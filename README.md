@@ -343,7 +343,7 @@ The MCP protocol defines three core primitives that servers can implement:
 
 ## Additional Examples
 
-Check out the [example](https://github.com/app-appplayer/mcp_server/example) directory for a complete sample application.
+Check out the [example](https://github.com/app-appplayer/mcp_server/tree/main/example) directory for a complete sample application.
 
 ## Resources
 
