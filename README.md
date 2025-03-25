@@ -44,7 +44,7 @@ dependencies:
 Or install via command line:
 
 ```bash
-flutter pub add mcp_server
+dart pub add mcp_server
 ```
 
 ### Basic Usage
