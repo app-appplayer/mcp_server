@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
+import '../../logger.dart';
 import '../models/models.dart';
 import '../transport/transport.dart';
 
@@ -82,11 +82,11 @@ class Server {
     required Map<String, dynamic> inputSchema,
     required ToolHandler handler,
   }) {
-    stderr.writeln('Adding tool: $name');
-    stderr.writeln('Input schema: $inputSchema');
+    Logger.debug('Adding tool: $name');
+    Logger.debug('Input schema: $inputSchema');
 
     if (_tools.containsKey(name)) {
-      stderr.writeln('Tool with name "$name" already exists');
+      Logger.debug('Tool with name "$name" already exists');
       throw McpError('Tool with name "$name" already exists');
     }
 
@@ -99,8 +99,8 @@ class Server {
     _tools[name] = tool;
     _toolHandlers[name] = handler;
 
-    stderr.writeln('Tool added successfully: $name');
-    stderr.writeln('Total tools: ${_tools.length}');
+    Logger.debug('Tool added successfully: $name');
+    Logger.debug('Total tools: ${_tools.length}');
 
     // Notify clients about tool changes if connected
     if (isConnected && capabilities.tools && capabilities.toolsListChanged) {
@@ -265,8 +265,8 @@ class Server {
         _sendErrorResponse(message.id, -32600, 'Invalid request');
       }
     } catch (e, stackTrace) {
-      stderr.writeln('Error processing message: $e');
-      stderr.writeln('Stacktrace: $stackTrace');
+      Logger.debug('Error processing message: $e');
+      Logger.debug('Stacktrace: $stackTrace');
 
       _sendErrorResponse(
           message.id,
@@ -279,20 +279,20 @@ class Server {
 
 // Handle a JSON-RPC notification
   Future<void> _handleNotification(JsonRpcMessage notification) async {
-    stderr.writeln('[Flutter MCP] Received notification: ${notification.method}');
+    Logger.debug('[Flutter MCP] Received notification: ${notification.method}');
 
     // Handle client notifications
     switch (notification.method) {
       case 'initialized':
       case 'notifications/initialized':
-        stderr.writeln('[Flutter MCP] Client initialized notification received');
+        Logger.debug('[Flutter MCP] Client initialized notification received');
         sendLog(LogLevel.info, 'Client initialized successfully');
         break;
       case 'client/ready':
-        stderr.writeln('[Flutter MCP] Client ready notification received');
+        Logger.debug('[Flutter MCP] Client ready notification received');
         break;
       default:
-        stderr.writeln('[Flutter MCP] Unknown notification: ${notification.method}');
+        Logger.debug('[Flutter MCP] Unknown notification: ${notification.method}');
         break;
     }
   }
@@ -321,6 +321,9 @@ class Server {
       case 'prompts/get':
         await _handlePromptGet(request);
         break;
+      case 'resources/templates/list':
+        await _handleResourceTemplatesList(request);
+        break;
       default:
         _sendErrorResponse(request.id, -32601, 'Method not found');
     }
@@ -345,27 +348,27 @@ class Server {
 
   /// Handle tools/list request
   Future<void> _handleToolsList(JsonRpcMessage request) async {
-    stderr.writeln('Tools listing requested');
-    stderr.writeln('Current tools: ${_tools.length}');
+    Logger.debug('Tools listing requested');
+    Logger.debug('Current tools: ${_tools.length}');
 
     if (!capabilities.tools) {
-      stderr.writeln('Tools capability not supported');
+      Logger.debug('Tools capability not supported');
       _sendErrorResponse(request.id, -32601, 'Tools capability not supported');
       return;
     }
 
     try {
       final toolsList = _tools.values.map((tool) {
-        stderr.writeln('Processing tool: ${tool.name}');
-        stderr.writeln('Tool input schema: ${tool.inputSchema}');
+        Logger.debug('Processing tool: ${tool.name}');
+        Logger.debug('Tool input schema: ${tool.inputSchema}');
         return tool.toJson();
       }).toList();
 
-      stderr.writeln('Sending tools list: $toolsList');
+      Logger.debug('Sending tools list: $toolsList');
       _sendResponse(request.id, {'tools': toolsList});
     } catch (e, stackTrace) {
-      stderr.writeln('Error in tools list: $e');
-      stderr.writeln('Stacktrace: $stackTrace');
+      Logger.debug('Error in tools list: $e');
+      Logger.debug('Stacktrace: $stackTrace');
       _sendErrorResponse(request.id, -32000, 'Internal server error processing tools');
     }
   }
@@ -446,6 +449,25 @@ class Server {
     }
   }
 
+  Future<void> _handleResourceTemplatesList(JsonRpcMessage request) async {
+    if (!capabilities.resources) {
+      _sendErrorResponse(request.id, -32601, 'Resources capability not supported');
+      return;
+    }
+
+    // URI 템플릿이 있는 리소스만 필터링
+    final resourceTemplates = _resources.values
+        .where((resource) => resource.uriTemplate != null)
+        .map((resource) => {
+      'uriTemplate': resource.uri,
+      'name': resource.name,
+      'description': resource.description,
+      'mimeType': resource.mimeType,
+    })
+        .toList();
+
+    _sendResponse(request.id, {'resourceTemplates': resourceTemplates});
+  }
 
   /// Handle prompts/list request
   Future<void> _handlePromptsList(JsonRpcMessage request) async {

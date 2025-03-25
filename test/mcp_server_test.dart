@@ -1,3 +1,4 @@
+import 'package:mcp_server/logger.dart';
 import 'package:test/test.dart';
 import 'package:mcp_server/mcp_server.dart';
 
@@ -29,7 +30,7 @@ void main() {
     });
 
     test('debug does not throw', () {
-      expect(() => McpServer.debug('Debug test message'), returnsNormally);
+      expect(() => Logger.debug('Debug test message'), returnsNormally);
     });
   });
 }

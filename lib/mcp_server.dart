@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'src/server/server.dart';
 import 'src/transport/transport.dart';
 
@@ -34,17 +32,14 @@ class McpServer {
     String? messagesEndpoint,
     int port = 8080,
     List<int>? fallbackPorts,
+    String? authToken,
   }) {
     return SseServerTransport(
       endpoint: endpoint,
       messagesEndpoint: messagesEndpoint ?? '/messages',
       port: port,
       fallbackPorts: fallbackPorts,
+      authToken: authToken,
     );
-  }
-
-  /// Log message to stderr for debugging
-  static void debug(String message) {
-    stderr.writeln('[MCP Debug] $message');
   }
 }

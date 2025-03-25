@@ -1,10 +1,11 @@
+import 'package:mcp_server/logger.dart';
 import 'package:mcp_server/mcp_server.dart';
 
 void main() {
   // Create MCP server instance
   final server = McpServer.createServer(
     name: 'ExampleMCPServer',
-    version: '2025.03.25',
+    version: '1.0.0',
   );
 
   // Create SSE transport for server
@@ -16,5 +17,5 @@ void main() {
   // Connect server to transport
   server.connect(transport);
 
-  McpServer.debug('MCP Server is running on http://localhost:8080/mcp');
+  Logger.debug('MCP Server is running on http://localhost:8080/mcp');
 }
