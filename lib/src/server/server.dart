@@ -82,11 +82,11 @@ class Server {
     required Map<String, dynamic> inputSchema,
     required ToolHandler handler,
   }) {
-    Logger.debug('Adding tool: $name');
-    Logger.debug('Input schema: $inputSchema');
+    log.debug('Adding tool: $name');
+    log.debug('Input schema: $inputSchema');
 
     if (_tools.containsKey(name)) {
-      Logger.debug('Tool with name "$name" already exists');
+      log.debug('Tool with name "$name" already exists');
       throw McpError('Tool with name "$name" already exists');
     }
 
@@ -99,8 +99,8 @@ class Server {
     _tools[name] = tool;
     _toolHandlers[name] = handler;
 
-    Logger.debug('Tool added successfully: $name');
-    Logger.debug('Total tools: ${_tools.length}');
+    log.debug('Tool added successfully: $name');
+    log.debug('Total tools: ${_tools.length}');
 
     // Notify clients about tool changes if connected
     if (isConnected && capabilities.tools && capabilities.toolsListChanged) {
@@ -210,7 +210,7 @@ class Server {
   }
 
   /// Send a logging notification to the client
-  void sendLog(LogLevel level, String message, {String? logger, Map<String, dynamic>? data}) {
+  void sendLog(McpLogLevel level, String message, {String? logger, Map<String, dynamic>? data}) {
     if (!isConnected) return;
 
     final params = {
@@ -265,8 +265,8 @@ class Server {
         _sendErrorResponse(message.id, -32600, 'Invalid request');
       }
     } catch (e, stackTrace) {
-      Logger.debug('Error processing message: $e');
-      Logger.debug('Stacktrace: $stackTrace');
+      log.debug('Error processing message: $e');
+      log.debug('Stacktrace: $stackTrace');
 
       _sendErrorResponse(
           message.id,
@@ -279,20 +279,20 @@ class Server {
 
 // Handle a JSON-RPC notification
   Future<void> _handleNotification(JsonRpcMessage notification) async {
-    Logger.debug('[Flutter MCP] Received notification: ${notification.method}');
+    log.debug('[Flutter MCP] Received notification: ${notification.method}');
 
     // Handle client notifications
     switch (notification.method) {
       case 'initialized':
       case 'notifications/initialized':
-        Logger.debug('[Flutter MCP] Client initialized notification received');
-        sendLog(LogLevel.info, 'Client initialized successfully');
+        log.debug('[Flutter MCP] Client initialized notification received');
+        sendLog(McpLogLevel.info, 'Client initialized successfully');
         break;
       case 'client/ready':
-        Logger.debug('[Flutter MCP] Client ready notification received');
+        log.debug('[Flutter MCP] Client ready notification received');
         break;
       default:
-        Logger.debug('[Flutter MCP] Unknown notification: ${notification.method}');
+        log.debug('[Flutter MCP] Unknown notification: ${notification.method}');
         break;
     }
   }
@@ -348,27 +348,27 @@ class Server {
 
   /// Handle tools/list request
   Future<void> _handleToolsList(JsonRpcMessage request) async {
-    Logger.debug('Tools listing requested');
-    Logger.debug('Current tools: ${_tools.length}');
+    log.debug('Tools listing requested');
+    log.debug('Current tools: ${_tools.length}');
 
     if (!capabilities.tools) {
-      Logger.debug('Tools capability not supported');
+      log.debug('Tools capability not supported');
       _sendErrorResponse(request.id, -32601, 'Tools capability not supported');
       return;
     }
 
     try {
       final toolsList = _tools.values.map((tool) {
-        Logger.debug('Processing tool: ${tool.name}');
-        Logger.debug('Tool input schema: ${tool.inputSchema}');
+        log.debug('Processing tool: ${tool.name}');
+        log.debug('Tool input schema: ${tool.inputSchema}');
         return tool.toJson();
       }).toList();
 
-      Logger.debug('Sending tools list: $toolsList');
+      log.debug('Sending tools list: $toolsList');
       _sendResponse(request.id, {'tools': toolsList});
     } catch (e, stackTrace) {
-      Logger.debug('Error in tools list: $e');
-      Logger.debug('Stacktrace: $stackTrace');
+      log.debug('Error in tools list: $e');
+      log.debug('Stacktrace: $stackTrace');
       _sendErrorResponse(request.id, -32000, 'Internal server error processing tools');
     }
   }
@@ -690,18 +690,6 @@ class JsonRpcMessage {
       error: json['error'] != null ? Map<String, dynamic>.from(json['error']) : null,
     );
   }
-}
-
-/// Logging levels for MCP
-enum LogLevel {
-  debug,
-  info,
-  notice,
-  warning,
-  error,
-  critical,
-  alert,
-  emergency
 }
 
 /// Type definition for tool handler functions

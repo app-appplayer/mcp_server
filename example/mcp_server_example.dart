@@ -17,5 +17,5 @@ void main() {
   // Connect server to transport
   server.connect(transport);
 
-  Logger.debug('MCP Server is running on http://localhost:8080/mcp');
+  log.debug('MCP Server is running on http://localhost:8080/mcp');
 }

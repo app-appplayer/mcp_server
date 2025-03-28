@@ -30,7 +30,7 @@ void main() {
     });
 
     test('debug does not throw', () {
-      expect(() => Logger.debug('Debug test message'), returnsNormally);
+      expect(() => log.debug('Debug test message'), returnsNormally);
     });
   });
 }

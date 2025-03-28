@@ -1,4 +1,12 @@
+## 0.1.2
+
+* Logging System Improvement
+    * Enhanced the default logger to allow dynamic log level configuration
+    * Reduced redundant log statements and improved performance for higher-volume logging
+    * Added options to colorize logs and include timestamps for easier debugging
+
 ## 0.1.1
+
 * SSE Endpoint Improvements
     * Added compatibility with MCP Inspector by sending initial SSE event in event: endpoint format
     * Ensured event: message usage for subsequent JSON-RPC data

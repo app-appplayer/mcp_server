@@ -432,3 +432,15 @@ class Root {
     };
   }
 }
+
+/// Logging levels for MCP protocol
+enum McpLogLevel {
+  debug,
+  info,
+  notice,
+  warning,
+  error,
+  critical,
+  alert,
+  emergency
+}
