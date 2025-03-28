@@ -15,23 +15,13 @@ typedef ProgressCallback = void Function(double progress, String message);
 typedef IsCancelledCheck = bool Function();
 
 /// Type definition for tool handler functions with cancellation and progress reporting
-typedef ToolHandler = Future<CallToolResult> Function(
-    Map<String, dynamic> arguments,
-    {ProgressCallback? progressCallback, IsCancelledCheck? isCancelled}
-    );
+typedef ToolHandler = Future<CallToolResult> Function(Map<String, dynamic> arguments);
 
 /// Type definition for resource handler functions
-typedef ResourceHandler = Future<ReadResourceResult> Function(
-    String uri,
-    Map<String, dynamic> params,
-    {IsCancelledCheck? isCancelled}
-    );
+typedef ResourceHandler = Future<ReadResourceResult> Function(String uri, Map<String, dynamic> params);
 
 /// Type definition for prompt handler functions
-typedef PromptHandler = Future<GetPromptResult> Function(
-    Map<String, dynamic> arguments,
-    {IsCancelledCheck? isCancelled}
-    );
+typedef PromptHandler = Future<GetPromptResult> Function(Map<String, dynamic> arguments);
 
 /// Main MCP Server class that handles all server-side protocol operations
 class Server implements ServerInterface {
@@ -192,6 +182,38 @@ class Server implements ServerInterface {
     incrementMetric('operations.registered');
 
     return operation;
+  }
+
+  /// Send progress notification for a tool operation
+  void notifyProgress(String operationId, double progress, String message) {
+    // Find the session and request ID for this operation
+    final operation = _pendingOperations[operationId];
+    if (operation?.requestId != null) {
+      sendProgressNotification(
+          operation!.sessionId,
+          operation.requestId!,
+          progress,
+          message
+      );
+    }
+  }
+
+  /// Check if operation is cancelled
+  bool isOperationCancelled(String operationId) {
+    final operation = _pendingOperations[operationId];
+    return operation?.isCancelled ?? false;
+  }
+
+  /// Register a tool call and get an operation ID for progress/cancellation
+  String registerToolCall(String toolName, String sessionId, dynamic requestId) {
+    final operationId = Uuid().v4();
+    _pendingOperations[operationId] = PendingOperation(
+        id: operationId,
+        sessionId: sessionId,
+        type: 'tool:$toolName',
+        requestId: requestId.toString()
+    );
+    return operationId;
   }
 
   /// Add a tool to the server
@@ -817,37 +839,21 @@ class Server implements ServerInterface {
     final handler = _toolHandlers[toolName]!;
     final arguments = request.params?['arguments'] ?? {};
 
-    // Register operation for potential cancellation
-    final operation = registerOperation(sessionId, 'tool:$toolName');
+    // Register operation
+    final operationId = registerToolCall(toolName!, sessionId, request.id);
 
     try {
-      // Progress callback for reporting progress
-      final progressCallback = (double progress, String message) {
-        sendProgressNotification(sessionId, request.id.toString(), progress, message);
-      };
+      // Call the handler with just the arguments
+      final result = await handler(arguments);
 
-      // Cancellation check callback
-      final isCancelled = () => operation.isCancelled;
-
-      final result = await handler(
-        arguments,
-        progressCallback: progressCallback,
-        isCancelled: isCancelled,
-      );
-
-      if (operation.isCancelled) {
-        _sendErrorResponse(
-            sessionId,
-            request.id,
-            ErrorCode.operationCancelled,
-            'Operation cancelled by client'
-        );
+      if (isOperationCancelled(operationId)) {
+        _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled, 'Operation cancelled by client');
       } else {
         _sendResponse(sessionId, request.id, result.toJson());
-        _pendingOperations.remove(operation.id);
+        _pendingOperations.remove(operationId);
       }
     } catch (e) {
-      _pendingOperations.remove(operation.id);
+      _pendingOperations.remove(operationId);
       _sendErrorResponse(
         sessionId,
         request.id,
@@ -908,15 +914,21 @@ class Server implements ServerInterface {
     }
 
     // Register operation for potential cancellation
-    final operation = registerOperation(sessionId, 'resource:$uri');
+    final operationId = Uuid().v4();
+    _pendingOperations[operationId] = PendingOperation(
+      id: operationId,
+      sessionId: sessionId,
+      type: 'resource:$uri',
+      requestId: request.id.toString(),
+    );
 
     try {
-      // Cancellation check callback
-      final isCancelled = () => operation.isCancelled;
+      final result = await handler(
+        uri,
+        request.params ?? {},
+      );
 
-      final result = await handler(uri, request.params ?? {}, isCancelled: isCancelled);
-
-      if (operation.isCancelled) {
+      if (_pendingOperations[operationId]?.isCancelled ?? false) {
         _sendErrorResponse(
             sessionId,
             request.id,
@@ -933,10 +945,11 @@ class Server implements ServerInterface {
         }
 
         _sendResponse(sessionId, request.id, result.toJson());
-        _pendingOperations.remove(operation.id);
+        _pendingOperations.remove(operationId);
       }
     } catch (e) {
-      _pendingOperations.remove(operation.id);
+      _pendingOperations.remove(operationId);
+
       _sendErrorResponse(
         sessionId,
         request.id,
@@ -1040,15 +1053,18 @@ class Server implements ServerInterface {
     final arguments = request.params?['arguments'] ?? {};
 
     // Register operation for potential cancellation
-    final operation = registerOperation(sessionId, 'prompt:$promptName');
+    final operationId = Uuid().v4();
+    _pendingOperations[operationId] = PendingOperation(
+      id: operationId,
+      sessionId: sessionId,
+      type: 'prompt:$promptName',
+      requestId: request.id.toString(),
+    );
 
     try {
-      // Cancellation check callback
-      final isCancelled = () => operation.isCancelled;
+      final result = await handler(arguments);
 
-      final result = await handler(arguments, isCancelled: isCancelled);
-
-      if (operation.isCancelled) {
+      if (_pendingOperations[operationId]?.isCancelled ?? false) {
         _sendErrorResponse(
             sessionId,
             request.id,
@@ -1057,10 +1073,10 @@ class Server implements ServerInterface {
         );
       } else {
         _sendResponse(sessionId, request.id, result.toJson());
-        _pendingOperations.remove(operation.id);
+        _pendingOperations.remove(operationId);
       }
     } catch (e) {
-      _pendingOperations.remove(operation.id);
+      _pendingOperations.remove(operationId);
       _sendErrorResponse(
         sessionId,
         request.id,

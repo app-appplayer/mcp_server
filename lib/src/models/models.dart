@@ -189,14 +189,20 @@ class Resource {
 
 /// Resource read result
 class ReadResourceResult {
-  final List<ResourceContent> contents;
+  final String content;
+  final String mimeType;
+  final List<Content> contents;
 
   ReadResourceResult({
+    required this.content,
+    required this.mimeType,
     required this.contents,
   });
 
   Map<String, dynamic> toJson() {
     return {
+      'content': content,
+      'mime_type': mimeType,
       'contents': contents.map((c) => c.toJson()).toList(),
     };
   }
@@ -556,12 +562,14 @@ class PendingOperation {
   final String sessionId;
   final String type;
   final DateTime createdAt;
+  final String? requestId;
   bool isCancelled = false;
 
   PendingOperation({
     required this.id,
     required this.sessionId,
     required this.type,
+    this.requestId,
   }) : createdAt = DateTime.now();
 
   Map<String, dynamic> toJson() {
@@ -571,10 +579,10 @@ class PendingOperation {
       'type': type,
       'created_at': createdAt.toIso8601String(),
       'is_cancelled': isCancelled,
+      if (requestId != null) 'request_id': requestId,
     };
   }
 }
-
 /// Error codes for standardized error handling
 class ErrorCode {
   // Standard JSON-RPC error codes
