@@ -12,7 +12,7 @@ class MockMessageHandler {
   Future<Map<String, dynamic>> processRequest(
       String method, Map<String, dynamic>? params) async {
     final completer = Completer<Map<String, dynamic>>();
-    final sessionId = 'test-session';
+    //final sessionId = 'test-session';
     final requestId = 1;
 
     // Create mock transport that captures the response

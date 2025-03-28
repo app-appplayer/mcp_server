@@ -1,12 +1,10 @@
-library mcp_server;
+import 'src/server/server.dart';
+import 'src/transport/transport.dart';
 
 export 'src/models/models.dart';
 export 'src/server/server.dart';
 export 'src/transport/transport.dart';
 export 'logger.dart';
-
-import 'src/server/server.dart';
-import 'src/transport/transport.dart';
 
 /// Factory class for creating MCP servers and transports
 class McpServer {
