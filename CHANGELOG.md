@@ -1,8 +1,22 @@
 ## 0.1.2
 
-* Logging System Improvement
-    * Enhanced the default logger to allow dynamic log level configuration
-    * Reduced redundant log statements and improved performance for higher-volume logging
+* Added
+    * Full implementation of MCP protocol 2024-11-05
+    * Sampling support with client request forwarding
+    * Roots management for filesystem boundary control
+    * Resource subscription system with updates notification
+    * Resource caching mechanism for performance optimization
+    * Operation cancellation support
+    * Progress reporting for long-running operations
+* Fixed
+    * Protocol version negotiation now properly supports multiple versions
+    * Type inconsistencies in model classes and JSON conversions
+    * Ensured capabilities are properly exposed based on server configuration
+* Improved
+    * Error handling with standardized error codes
+    * Session management for multiple client connections
+    * server health monitoring and metrics tracking
+    * Transport implementation with better CORS support
     * Added options to colorize logs and include timestamps for easier debugging
 
 ## 0.1.1
