@@ -190,6 +190,7 @@ class SseServerTransport implements ServerTransport {
 
   void _handleSseConnection(HttpRequest request) async {
     if (request.method == 'OPTIONS') {
+      _setCorsHeaders(request.response);
       request.response
         ..statusCode = HttpStatus.ok
         ..close();
@@ -199,6 +200,7 @@ class SseServerTransport implements ServerTransport {
     if (authToken != null) {
       final authHeader = request.headers.value('Authorization');
       if (authHeader == null || authHeader != 'Bearer $authToken') {
+        _setCorsHeaders(request.response);
         request.response
           ..statusCode = HttpStatus.unauthorized
           ..headers.add('Content-Type', 'application/json')
@@ -210,11 +212,11 @@ class SseServerTransport implements ServerTransport {
     }
 
     final sessionId = DateTime.now().millisecondsSinceEpoch.toString();
+    _setCorsHeaders(request.response);
     request.response.headers
       ..add('Content-Type', 'text/event-stream')
       ..add('Cache-Control', 'no-cache')
       ..add('Connection', 'keep-alive')
-      ..add('Access-Control-Allow-Origin', '*')
       ..add('X-Session-Id', sessionId);
 
     request.response.bufferOutput = false;
@@ -229,15 +231,34 @@ class SseServerTransport implements ServerTransport {
 
     request.response.done.then((_) {
       log.debug('[SSE] Client disconnected: $sessionId');
+      _sessionClients.remove(sessionId);
     }).catchError((e) {
       log.debug('[SSE] Client error: $sessionId - $e');
+      _sessionClients.remove(sessionId);
     });
   }
 
+  void _setCorsHeaders(HttpResponse response) {
+    response.headers
+      ..add('Access-Control-Allow-Origin', '*')
+      ..add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      ..add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+      ..add('Access-Control-Max-Age', '86400');
+  }
+
   Future<void> _handleMessageRequest(HttpRequest request) async {
+    if (request.method == 'OPTIONS') {
+      _setCorsHeaders(request.response);
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..close();
+      return;
+    }
+
     final sessionId = request.uri.queryParameters['sessionId'];
 
     if (sessionId == null || !_sessionClients.containsKey(sessionId)) {
+      _setCorsHeaders(request.response);
       request.response
         ..statusCode = HttpStatus.unauthorized
         ..headers.add('Content-Type', 'application/json')
@@ -247,14 +268,8 @@ class SseServerTransport implements ServerTransport {
       return;
     }
 
-    if (request.method == 'OPTIONS') {
-      request.response
-        ..statusCode = HttpStatus.ok
-        ..close();
-      return;
-    }
-
     if (request.method != 'POST') {
+      _setCorsHeaders(request.response);
       request.response
         ..statusCode = HttpStatus.methodNotAllowed
         ..close();
@@ -268,6 +283,7 @@ class SseServerTransport implements ServerTransport {
       if (message is Map && message['jsonrpc'] == '2.0') {
         _messageController.add(message);
 
+        _setCorsHeaders(request.response);
         request.response
           ..statusCode = HttpStatus.ok
           ..headers.add('Content-Type', 'application/json')
@@ -276,6 +292,7 @@ class SseServerTransport implements ServerTransport {
         throw FormatException('Invalid JSON-RPC message');
       }
     } catch (e) {
+      _setCorsHeaders(request.response);
       request.response
         ..statusCode = HttpStatus.badRequest
         ..headers.add('Content-Type', 'application/json')
@@ -283,11 +300,6 @@ class SseServerTransport implements ServerTransport {
     }
 
     await request.response.close();
-  }
-
-  bool isValidToken(String authHeader) {
-    const expectedToken = 'Bearer your_token_here';
-    return authHeader == expectedToken;
   }
 
   @override
@@ -312,7 +324,6 @@ class SseServerTransport implements ServerTransport {
     }
   }
 
-
   @override
   void close() async {
     for (final client in _sessionClients.values) {
@@ -325,6 +336,40 @@ class SseServerTransport implements ServerTransport {
 
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.complete();
+    }
+  }
+}
+
+/// Mock transport for testing
+class MockTransport implements ServerTransport {
+  final void Function(dynamic)? onSendCallback;
+  final _messageController = StreamController<dynamic>.broadcast();
+  final _closeCompleter = Completer<void>();
+
+  MockTransport({this.onSendCallback});
+
+  @override
+  Stream<dynamic> get onMessage => _messageController.stream;
+
+  @override
+  Future<void> get onClose => _closeCompleter.future;
+
+  @override
+  void send(dynamic message) {
+    if (onSendCallback != null) {
+      onSendCallback!(message);
+    }
+  }
+
+  @override
+  void close() {
+    _closeCompleter.complete();
+    _messageController.close();
+  }
+
+  void receiveMessage(dynamic message) {
+    if (!_messageController.isClosed) {
+      _messageController.add(message);
     }
   }
 }

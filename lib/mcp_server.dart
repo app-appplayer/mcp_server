@@ -1,14 +1,16 @@
-import 'src/server/server.dart';
-import 'src/transport/transport.dart';
+library mcp_server;
 
 export 'src/models/models.dart';
 export 'src/server/server.dart';
 export 'src/transport/transport.dart';
+export 'logger.dart';
 
-/// Main plugin class for MCP Server implementation
+import 'src/server/server.dart';
+import 'src/transport/transport.dart';
+
+/// Factory class for creating MCP servers and transports
 class McpServer {
-
-  /// Create a new MCP server with the specified configuration
+  /// Create a new MCP server
   static Server createServer({
     required String name,
     required String version,
@@ -21,12 +23,12 @@ class McpServer {
     );
   }
 
-  /// Create a stdio transport for the server
+  /// Create a stdio transport
   static StdioServerTransport createStdioTransport() {
     return StdioServerTransport();
   }
 
-  /// Create an SSE transport for the server with configurable ports
+  /// Create an SSE transport
   static SseServerTransport createSseTransport({
     required String endpoint,
     String? messagesEndpoint,
