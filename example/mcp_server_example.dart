@@ -170,10 +170,8 @@ void _registerTools(Server server) {
     },
     handler: (args) async {
       try {
-        // 입력값 로깅 및 안전한 형식 변환
         log.debug("[DateTime Tool] Received args: $args");
 
-        // 보다 안전한 형식 추출
         String format;
         if (args['format'] == null) {
           format = 'full';
@@ -210,7 +208,6 @@ void _registerTools(Server server) {
               result = now.toIso8601String();
             } catch (e) {
               log.debug("[DateTime Tool] Error with ISO format: $e");
-              // 대체 형식 사용
               result = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} " +
                   "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
             }

@@ -9,26 +9,19 @@ A Dart plugin for implementing [Model Context Protocol (MCP)](https://modelconte
 - Provide functionality through **Tools**
 - Define interaction patterns through **Prompts**
 - Multiple transport layers:
-    - Standard I/O for local process communication
-    - Server-Sent Events (SSE) for HTTP-based communication
+  - Standard I/O for local process communication
+  - Server-Sent Events (SSE) for HTTP-based communication
 - Cross-platform support: Android, iOS, web, Linux, Windows, macOS
 
 ## Protocol Version
 
-This package implements the Model Context Protocol (MCP) specification version `2024-11-05`.
+This package implements the Model Context Protocol (MCP) specification versions `2024-11-05` and `2025-03-26`.
 
 The protocol version is crucial for ensuring compatibility between MCP clients and servers. Each release of this package may support different protocol versions, so it's important to:
 
 - Check the CHANGELOG.md for protocol version updates
 - Ensure client and server protocol versions are compatible
 - Stay updated with the latest MCP specification
-
-### Version Compatibility
-
-- Supported protocol version: 2024-11-05
-- Compatibility: Tested with latest MCP client implementations
-
-For the most up-to-date information on protocol versions and compatibility, refer to the [Model Context Protocol specification](https://spec.modelcontextprotocol.io).
 
 ## Getting Started
 
@@ -38,7 +31,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_server: ^0.1.0
+  mcp_server: ^0.1.2
 ```
 
 Or install via command line:
@@ -74,47 +67,52 @@ void main() {
         'operation': {
           'type': 'string',
           'enum': ['add', 'subtract', 'multiply', 'divide'],
+          'description': 'Mathematical operation to perform'
         },
-        'a': {'type': 'number'},
-        'b': {'type': 'number'},
+        'a': {
+          'type': 'number',
+          'description': 'First operand'
+        },
+        'b': {
+          'type': 'number',
+          'description': 'Second operand'
+        }
       },
-      'required': ['operation', 'a', 'b'],
+      'required': ['operation', 'a', 'b']
     },
     handler: (arguments) async {
       final operation = arguments['operation'] as String;
-      final a = arguments['a'] as num;
-      final b = arguments['b'] as num;
+      final a = (arguments['a'] is int) ? (arguments['a'] as int).toDouble() : arguments['a'] as double;
+      final b = (arguments['b'] is int) ? (arguments['b'] as int).toDouble() : arguments['b'] as double;
       
       double result;
       switch (operation) {
         case 'add':
-          result = (a + b).toDouble();
+          result = a + b;
           break;
         case 'subtract':
-          result = (a - b).toDouble();
+          result = a - b;
           break;
         case 'multiply':
-          result = (a * b).toDouble();
+          result = a * b;
           break;
         case 'divide':
           if (b == 0) {
             return CallToolResult(
-              content: [TextContent(text: 'Division by zero error')],
+              [TextContent(text: 'Division by zero error')],
               isError: true,
             );
           }
-          result = (a / b).toDouble();
+          result = a / b;
           break;
         default:
           return CallToolResult(
-            content: [TextContent(text: 'Unknown operation: $operation')],
+            [TextContent(text: 'Unknown operation: $operation')],
             isError: true,
           );
       }
       
-      return CallToolResult(
-        content: [TextContent(text: result.toString())],
-      );
+      return CallToolResult([TextContent(text: 'Result: $result')]);
     },
   );
 
@@ -128,13 +126,12 @@ void main() {
       final now = DateTime.now().toString();
       
       return ReadResourceResult(
+        content: now,
+        mimeType: 'text/plain',
         contents: [
           ResourceContent(
-            resource: Resource(
-              uri: uri.toString(),
-              name: 'Current Time',
-              mimeType: 'text/plain',
-            ),
+            uri: uri,
+            text: now,
           ),
         ],
       );
@@ -151,25 +148,41 @@ void main() {
         description: 'Name to greet',
         required: true,
       ),
+      PromptArgument(
+        name: 'formal',
+        description: 'Whether to use formal greeting style',
+        required: false,
+      ),
     ],
     handler: (arguments) async {
-      final name = arguments?['name'] as String? ?? 'User';
-      
+      final name = arguments['name'] as String;
+      final formal = arguments['formal'] as bool? ?? false;
+
+      final String systemPrompt = formal
+          ? 'You are a formal assistant. Address the user with respect and formality.'
+          : 'You are a friendly assistant. Be warm and casual in your tone.';
+
+      final messages = [
+        Message(
+          role: MessageRole.system.toString().split('.').last,
+          content: TextContent(text: systemPrompt),
+        ),
+        Message(
+          role: MessageRole.user.toString().split('.').last,
+          content: TextContent(text: 'Please greet $name'),
+        ),
+      ];
+
       return GetPromptResult(
-        description: 'A friendly greeting',
-        messages: [
-          Message(
-            role: MessageRole.user,
-            content: TextContent(text: 'Hello, $name!'),
-          ),
-        ],
+        description: 'A ${formal ? 'formal' : 'casual'} greeting for $name',
+        messages: messages,
       );
     },
   );
 
   // Connect to transport
-  final transport = rMcpServer.createStdioTransport();
-  await server.connect(transport);
+  final transport = McpServer.createStdioTransport();
+  server.connect(transport);
 }
 ```
 
@@ -177,7 +190,7 @@ void main() {
 
 ### Server
 
-The `McpServer` is your core interface to the MCP protocol. It handles connection management, protocol compliance, and message routing:
+The `Server` class is your core interface to the MCP protocol. It handles connection management, protocol compliance, and message routing:
 
 ```dart
 final server = McpServer.createServer(
@@ -203,38 +216,48 @@ server.addResource(
   description: 'Application configuration data',
   mimeType: 'text/plain',
   handler: (uri, params) async {
+    final configData = "app_name=MyApp\nversion=1.0.0\ndebug=false";
+    
     return ReadResourceResult(
+      content: configData,
+      mimeType: 'text/plain',
       contents: [
         ResourceContent(
-          resource: Resource(
-            uri: uri.toString(),
-            name: 'App Configuration',
-            mimeType: 'text/plain',
-          ),
+          uri: uri,
+          text: configData,
         ),
       ],
     );
   },
 );
 
-// Dynamic resource with parameters
-server.addResourceTemplate(
-  uriTemplate: 'users://{userId}/profile',
-  name: 'User Profile',
-  description: 'Profile data for specific user',
-  mimeType: 'text/plain',
+// Resource with URI template
+server.addResource(
+  uri: 'file://{path}',
+  name: 'File Resource',
+  description: 'Access files on the system',
+  mimeType: 'application/octet-stream',
+  uriTemplate: {
+    'type': 'object',
+    'properties': {
+      'path': {
+        'type': 'string',
+        'description': 'Path to the file'
+      }
+    }
+  },
   handler: (uri, params) async {
-    final userId = params['userId'];
-    // Fetch user data...
+    // Extract path and read file content
+    final path = params['path'] ?? uri.substring('file://'.length);
+    final content = await File(path).readAsString();
     
     return ReadResourceResult(
+      content: content,
+      mimeType: 'text/plain',
       contents: [
         ResourceContent(
-          resource: Resource(
-            uri: uri.toString(),
-            name: 'User Profile',
-            mimeType: 'text/plain',
-          ),
+          uri: uri,
+          text: content,
         ),
       ],
     );
@@ -248,25 +271,38 @@ Tools let LLMs take actions through your server. Unlike resources, tools are exp
 
 ```dart
 server.addTool(
-  name: 'search-web',
-  description: 'Search the web for information',
+  name: 'currentDateTime',
+  description: 'Get the current date and time',
   inputSchema: {
     'type': 'object',
     'properties': {
-      'query': {'type': 'string'},
-      'maxResults': {'type': 'number'},
+      'format': {
+        'type': 'string',
+        'description': 'Output format (full, date, time)',
+        'default': 'full'
+      }
     },
-    'required': ['query'],
+    'required': []
   },
-  handler: (arguments) async {
-    final query = arguments['query'] as String;
-    final maxResults = arguments['maxResults'] as int? ?? 5;
+  handler: (args) async {
+    final format = args['format'] as String? ?? 'full';
+    final now = DateTime.now();
     
-    // Perform web search...
+    String result;
+    switch (format) {
+      case 'date':
+        result = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+        break;
+      case 'time':
+        result = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+        break;
+      case 'full':
+      default:
+        result = now.toIso8601String();
+        break;
+    }
     
-    return CallToolResult(
-      content: [TextContent(text: 'Search results here')],
-    );
+    return CallToolResult([TextContent(text: result)]);
   },
 );
 ```
@@ -277,32 +313,47 @@ Prompts are reusable templates that help LLMs interact with your server effectiv
 
 ```dart
 server.addPrompt(
-  name: 'analyze-code',
-  description: 'Analyze code for potential issues',
+  name: 'codeReview',
+  description: 'Generate a code review for a code snippet',
   arguments: [
     PromptArgument(
       name: 'code',
-      description: 'Code to analyze',
+      description: 'Code to review',
       required: true,
     ),
     PromptArgument(
       name: 'language',
-      description: 'Programming language',
-      required: false,
+      description: 'Programming language of the code',
+      required: true,
     ),
   ],
-  handler: (arguments) async {
-    final code = arguments?['code'] as String? ?? '';
-    final language = arguments?['language'] as String? ?? 'unknown';
-    
+  handler: (args) async {
+    final code = args['code'] as String;
+    final language = args['language'] as String;
+
+    final systemPrompt = '''
+You are an expert code reviewer. Review the provided code with these guidelines:
+1. Identify potential bugs or issues
+2. Suggest optimizations for performance or readability
+3. Highlight good practices used in the code
+4. Provide constructive feedback for improvements
+Be specific in your feedback and provide code examples when suggesting changes.
+''';
+
+    final messages = [
+      Message(
+        role: MessageRole.system.toString().split('.').last,
+        content: TextContent(text: systemPrompt),
+      ),
+      Message(
+        role: MessageRole.user.toString().split('.').last,
+        content: TextContent(text: 'Please review this $language code:\n\n```$language\n$code\n```'),
+      ),
+    ];
+
     return GetPromptResult(
-      description: 'Code analysis request',
-      messages: [
-        Message(
-          role: MessageRole.user,
-          content: TextContent(text: 'Please analyze this $language code:\n\n$code'),
-        ),
-      ],
+      description: 'Code review for $language code',
+      messages: messages,
     );
   },
 );
@@ -324,11 +375,27 @@ await server.connect(transport);
 For HTTP-based communication:
 
 ```dart
-final transport = FlutterMcpServer.createSseTransport(
+final transport = McpServer.createSseTransport(
   endpoint: '/sse',
   messagesEndpoint: '/messages',
+  port: 8080,
 );
 await server.connect(transport);
+```
+
+## Logging
+
+The package includes a built-in logging utility:
+
+```dart
+// Configure logging
+log.configure(level: LogLevel.debug, includeTimestamp: true, useColor: true);
+
+// Log messages at different levels
+log.debug('Debugging information');
+log.info('Important information');
+log.warning('Warning message');
+log.error('Error message');
 ```
 
 ## MCP Primitives
@@ -341,7 +408,77 @@ The MCP protocol defines three core primitives that servers can implement:
 | Resources | Application-controlled| Contextual data managed by the client application   | File contents, API responses |
 | Tools     | Model-controlled      | Functions exposed to the LLM to take actions        | API calls, data updates      |
 
-## Additional Examples
+## Additional Features
+
+### Resource Caching
+
+The server includes built-in caching for resources to improve performance:
+
+```dart
+// Use built-in caching mechanism
+final cached = server.getCachedResource(uri);
+if (cached != null) {
+  return cached.content;
+}
+
+// Cache a resource for future use
+server.cacheResource(uri, result, Duration(minutes: 10));
+
+// Invalidate cache
+server.invalidateCache(uri);
+```
+
+### Progress Tracking
+
+For long-running operations, you can report progress to clients:
+
+```dart
+server.addTool(
+  name: 'longRunningOperation',
+  description: 'Perform a long-running operation with progress reporting',
+  inputSchema: { /* ... */ },
+  handler: (args) async {
+    // Register operation for progress tracking
+    final operationId = server.registerOperation(sessionId, 'longRunningOperation');
+    
+    // Update progress as the operation progresses
+    for (int i = 0; i < 10; i++) {
+      // Check if operation was cancelled
+      if (server.isOperationCancelled(operationId)) {
+        return CallToolResult([TextContent(text: 'Operation cancelled')], isError: true);
+      }
+      
+      // Update progress (0.0 to 1.0)
+      server.notifyProgress(operationId, i / 10, 'Processing step $i of 10...');
+      
+      // Do work...
+      await Future.delayed(Duration(seconds: 1));
+    }
+    
+    return CallToolResult([TextContent(text: 'Operation completed successfully')]);
+  },
+);
+```
+
+### Health Monitoring
+
+The server provides built-in health metrics:
+
+```dart
+// Get server health information
+final health = server.getHealth();
+log.debug('Server uptime: ${health.uptime.inSeconds} seconds');
+log.debug('Connected sessions: ${health.connectedSessions}');
+log.debug('Registered tools: ${health.registeredTools}');
+
+// Track custom metrics
+server.incrementMetric('api_calls');
+final timer = server.startTimer('operation_duration');
+// ... perform operation
+server.stopTimer('operation_duration');
+```
+
+## Examples
 
 Check out the [example](https://github.com/app-appplayer/mcp_server/tree/main/example) directory for a complete sample application.
 
