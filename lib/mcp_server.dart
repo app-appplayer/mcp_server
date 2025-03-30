@@ -6,6 +6,7 @@ export 'src/server/server.dart';
 export 'src/transport/transport.dart';
 export 'logger.dart';
 
+typedef MCPServer = McpServer;
 /// Factory class for creating MCP servers and transports
 class McpServer {
   /// Create a new MCP server

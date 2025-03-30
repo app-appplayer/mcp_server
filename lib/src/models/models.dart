@@ -161,7 +161,7 @@ class Resource {
   final String name;
   final String description;
   final String mimeType;
-  final Map<String, dynamic>? uriTemplate; // String?에서 Map<String, dynamic>?로 변경
+  final Map<String, dynamic>? uriTemplate;
 
   Resource({
     required this.uri,
