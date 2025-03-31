@@ -14,7 +14,7 @@ final log = Logger.instance;
 class Logger {
   static final Map<String, Logger> _loggers = {};
 
-  static final Logger _instance = Logger._internal('mcp_llm');
+  static final Logger _instance = Logger._internal('mcp_server');
   static Logger get instance => _instance;
 
   final String name;
