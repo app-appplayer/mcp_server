@@ -388,14 +388,18 @@ await server.connect(transport);
 The package includes a built-in logging utility:
 
 ```dart
+/// Logging
+final Logger _logger = Logger.getLogger('mcp_server.test');
+_logger.setLevel(LogLevel.debug);
+
 // Configure logging
-log.configure(level: LogLevel.debug, includeTimestamp: true, useColor: true);
+_logger.configure(level: LogLevel.debug, includeTimestamp: true, useColor: true);
 
 // Log messages at different levels
-log.debug('Debugging information');
-log.info('Important information');
-log.warning('Warning message');
-log.error('Error message');
+_logger.debug('Debugging information');
+_logger.info('Important information');
+_logger.warning('Warning message');
+_logger.error('Error message');
 ```
 
 ## MCP Primitives
@@ -467,9 +471,9 @@ The server provides built-in health metrics:
 ```dart
 // Get server health information
 final health = server.getHealth();
-log.debug('Server uptime: ${health.uptime.inSeconds} seconds');
-log.debug('Connected sessions: ${health.connectedSessions}');
-log.debug('Registered tools: ${health.registeredTools}');
+_logger.debug('Server uptime: ${health.uptime.inSeconds} seconds');
+_logger.debug('Connected sessions: ${health.connectedSessions}');
+_logger.debug('Registered tools: ${health.registeredTools}');
 
 // Track custom metrics
 server.incrementMetric('api_calls');

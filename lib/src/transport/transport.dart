@@ -4,6 +4,8 @@ import 'dart:io';
 
 import '../../logger.dart';
 
+final Logger _logger = Logger.getLogger('mcp_server.transport');
+
 /// Abstract base class for server transport implementations
 abstract class ServerTransport {
   /// Stream of incoming messages
@@ -30,7 +32,7 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _initialize() {
-    log.debug('[Flutter MCP] Initializing STDIO transport');
+    _logger.debug('[Flutter MCP] Initializing STDIO transport');
 
     _stdinSubscription = stdin
         .transform(utf8.decoder)
@@ -38,30 +40,30 @@ class StdioServerTransport implements ServerTransport {
         .where((line) => line.isNotEmpty)
         .map((line) {
       try {
-        log.debug('[Flutter MCP] Raw received line: $line');
+        _logger.debug('[Flutter MCP] Raw received line: $line');
         final parsedMessage = jsonDecode(line);
-        log.debug('[Flutter MCP] Parsed message: $parsedMessage');
+        _logger.debug('[Flutter MCP] Parsed message: $parsedMessage');
         return parsedMessage;
       } catch (e) {
-        log.debug('[Flutter MCP] JSON parsing error: $e');
-        log.debug('[Flutter MCP] Problematic line: $line');
+        _logger.debug('[Flutter MCP] JSON parsing error: $e');
+        _logger.debug('[Flutter MCP] Problematic line: $line');
         return null;
       }
     })
         .where((message) => message != null)
         .listen(
           (message) {
-        log.debug('[Flutter MCP] Processing message: $message');
+        _logger.debug('[Flutter MCP] Processing message: $message');
         if (!_messageController.isClosed) {
           _messageController.add(message);
         }
       },
       onError: (error) {
-        log.debug('[Flutter MCP] Stream error: $error');
+        _logger.debug('[Flutter MCP] Stream error: $error');
         _handleTransportError(error);
       },
       onDone: () {
-        log.debug('[Flutter MCP] stdin stream done');
+        _logger.debug('[Flutter MCP] stdin stream done');
         _handleStreamClosure();
       },
       cancelOnError: false,
@@ -69,7 +71,7 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _handleTransportError(dynamic error) {
-    log.debug('[Flutter MCP] Transport error: $error');
+    _logger.debug('[Flutter MCP] Transport error: $error');
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.completeError(error);
     }
@@ -77,7 +79,7 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _handleStreamClosure() {
-    log.debug('[Flutter MCP] Handling stream closure');
+    _logger.debug('[Flutter MCP] Handling stream closure');
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.complete();
     }
@@ -101,23 +103,23 @@ class StdioServerTransport implements ServerTransport {
   void send(dynamic message) {
     try {
       final jsonMessage = jsonEncode(message);
-      log.debug('Encoding message: $message');
-      log.debug('Encoded JSON: $jsonMessage');
+      _logger.debug('Encoding message: $message');
+      _logger.debug('Encoded JSON: $jsonMessage');
 
       stdout.writeln(jsonMessage);
       stdout.flush();
 
-      log.debug('[MCP] Sent message: $jsonMessage');
+      _logger.debug('[MCP] Sent message: $jsonMessage');
     } catch (e) {
-      log.debug('Error encoding message: $e');
-      log.debug('Original message: $message');
+      _logger.debug('Error encoding message: $e');
+      _logger.debug('Original message: $message');
       rethrow;
     }
   }
 
   @override
   void close() {
-    log.debug('[MCP] Closing StdioServerTransport');
+    _logger.debug('[MCP] Closing StdioServerTransport');
     _cleanup();
   }
 }
@@ -149,18 +151,18 @@ class SseServerTransport implements ServerTransport {
   Future<void> _initialize() async {
     try {
       _server = await _startServer(port);
-      log.debug('[MCP] Server listening on port $port');
+      _logger.debug('[MCP] Server listening on port $port');
     } catch (e) {
-      log.debug('[MCP] Failed to start server on port $port: $e');
+      _logger.debug('[MCP] Failed to start server on port $port: $e');
 
       if (fallbackPorts != null && fallbackPorts!.isNotEmpty) {
         for (final fallbackPort in fallbackPorts!) {
           try {
             _server = await _startServer(fallbackPort);
-            log.debug('[MCP] Server listening on fallback port $fallbackPort');
+            _logger.debug('[MCP] Server listening on fallback port $fallbackPort');
             break;
           } catch (e) {
-            log.debug('[MCP] Failed to start server on fallback port $fallbackPort: $e');
+            _logger.debug('[MCP] Failed to start server on fallback port $fallbackPort: $e');
           }
         }
       }
@@ -206,7 +208,7 @@ class SseServerTransport implements ServerTransport {
           ..headers.add('Content-Type', 'application/json')
           ..write(jsonEncode({'error': 'Unauthorized'}))
           ..close();
-        log.debug('[SSE] Unauthorized access attempt.');
+        _logger.debug('[SSE] Unauthorized access attempt.');
         return;
       }
     }
@@ -225,15 +227,15 @@ class SseServerTransport implements ServerTransport {
     final endpointUrl = '/message?sessionId=$sessionId';
     request.response.write('data: $endpointUrl\n\n');
     await request.response.flush();
-    log.debug('[SSE] Sent connection_established message: $sessionId');
+    _logger.debug('[SSE] Sent connection_established message: $sessionId');
 
     _sessionClients[sessionId] = request.response;
 
     request.response.done.then((_) {
-      log.debug('[SSE] Client disconnected: $sessionId');
+      _logger.debug('[SSE] Client disconnected: $sessionId');
       _sessionClients.remove(sessionId);
     }).catchError((e) {
-      log.debug('[SSE] Client error: $sessionId - $e');
+      _logger.debug('[SSE] Client error: $sessionId - $e');
       _sessionClients.remove(sessionId);
     });
   }
@@ -264,7 +266,7 @@ class SseServerTransport implements ServerTransport {
         ..headers.add('Content-Type', 'application/json')
         ..write(jsonEncode({'error': 'Unauthorized or Invalid session'}));
       await request.response.close();
-      log.debug('[SSE] Unauthorized message attempt with invalid sessionId: $sessionId');
+      _logger.debug('[SSE] Unauthorized message attempt with invalid sessionId: $sessionId');
       return;
     }
 
@@ -319,7 +321,7 @@ class SseServerTransport implements ServerTransport {
           ..write(eventData)
           ..flush();
       } catch (e) {
-        log.debug('[SSE] Error sending message: $e');
+        _logger.debug('[SSE] Error sending message: $e');
       }
     }
   }

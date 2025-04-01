@@ -3,7 +3,11 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:mcp_server/mcp_server.dart';
 
+final Logger _logger = Logger.getLogger('mcp_server_example');
+
 void main(List<String> args) async {
+  _logger.setLevel(LogLevel.debug);
+  
   // MCP STDIO Mode
   if (args.contains('--mcp-stdio-mode')) {
     await startMcpServer(mode: 'stdio');
@@ -38,10 +42,10 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     // Create transport based on mode
     ServerTransport transport;
     if (mode == 'stdio') {
-      log.debug('[Flutter MCP] Starting server in STDIO mode');
+      _logger.debug('[Flutter MCP] Starting server in STDIO mode');
       transport = McpServer.createStdioTransport();
     } else {
-      log.debug('[Flutter MCP] Starting server in SSE mode on port $port');
+      _logger.debug('[Flutter MCP] Starting server in SSE mode on port $port');
       transport = McpServer.createSseTransport(
         endpoint: '/sse',
         messagesEndpoint: '/message',
@@ -52,7 +56,7 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
 
     // Set up transport closure handling
     transport.onClose.then((_) {
-      log.debug('[Flutter MCP] Transport closed, shutting down.');
+      _logger.debug('[Flutter MCP] Transport closed, shutting down.');
       exit(0);
     });
 
@@ -63,17 +67,17 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     server.sendLog(McpLogLevel.info, 'Flutter MCP Server started successfully');
 
     if (mode == 'sse') {
-      log.debug('[Flutter MCP] SSE Server is running on:');
-      log.debug('- SSE endpoint:     http://localhost:$port/sse');
-      log.debug('- Message endpoint: http://localhost:$port/message');
-      log.debug('[Flutter MCP] Press Ctrl+C to stop the server');
+      _logger.debug('[Flutter MCP] SSE Server is running on:');
+      _logger.debug('- SSE endpoint:     http://localhost:$port/sse');
+      _logger.debug('- Message endpoint: http://localhost:$port/message');
+      _logger.debug('[Flutter MCP] Press Ctrl+C to stop the server');
     } else {
-      log.debug('[Flutter MCP] STDIO Server initialized and connected to transport');
+      _logger.debug('[Flutter MCP] STDIO Server initialized and connected to transport');
     }
 
   } catch (e, stackTrace) {
-    log.debug('[Flutter MCP] Error initializing MCP server: $e');
-    log.debug(stackTrace as String);
+    _logger.debug('[Flutter MCP] Error initializing MCP server: $e');
+    _logger.debug(stackTrace as String);
     exit(1);
   }
 }
@@ -170,7 +174,7 @@ void _registerTools(Server server) {
     },
     handler: (args) async {
       try {
-        log.debug("[DateTime Tool] Received args: $args");
+        _logger.debug("[DateTime Tool] Received args: $args");
 
         String format;
         if (args['format'] == null) {
@@ -181,10 +185,10 @@ void _registerTools(Server server) {
           format = args['format'].toString();
         }
 
-        log.debug("[DateTime Tool] Using format: $format");
+        _logger.debug("[DateTime Tool] Using format: $format");
 
         final now = DateTime.now();
-        log.debug("[DateTime Tool] Current DateTime: $now");
+        _logger.debug("[DateTime Tool] Current DateTime: $now");
 
         String result;
         switch (format) {
@@ -198,7 +202,7 @@ void _registerTools(Server server) {
               final second = now.second.toString().padLeft(2, '0');
               result = '$hour:$minute:$second';
             } catch (e) {
-              log.debug("[DateTime Tool] Error formatting time: $e");
+              _logger.debug("[DateTime Tool] Error formatting time: $e");
               result = "Error formatting time: $e";
             }
             break;
@@ -207,18 +211,18 @@ void _registerTools(Server server) {
             try {
               result = now.toIso8601String();
             } catch (e) {
-              log.debug("[DateTime Tool] Error with ISO format: $e");
+              _logger.debug("[DateTime Tool] Error with ISO format: $e");
               result = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} " +
                   "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
             }
             break;
         }
 
-        log.debug("[DateTime Tool] Result: $result");
+        _logger.debug("[DateTime Tool] Result: $result");
         return CallToolResult([TextContent(text: result)]);
       } catch (e, stackTrace) {
-        log.debug("[DateTime Tool] Unexpected error: $e");
-        log.debug("[DateTime Tool] Stack trace: $stackTrace");
+        _logger.debug("[DateTime Tool] Unexpected error: $e");
+        _logger.debug("[DateTime Tool] Stack trace: $stackTrace");
         return CallToolResult(
             [TextContent(text: "Error getting date/time: $e")],
             isError: true

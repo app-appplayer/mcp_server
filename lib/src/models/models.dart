@@ -77,7 +77,7 @@ class ImageContent extends Content {
     return {
       'type': 'image',
       'url': url,
-      'mime_type': mimeType,
+      'mimeType': mimeType,
     };
   }
 }
@@ -149,8 +149,8 @@ class CallToolResult {
   Map<String, dynamic> toJson() {
     return {
       'content': content.map((c) => c.toJson()).toList(),
-      'is_streaming': isStreaming,
-      if (isError != null) 'is_error': isError,
+      'isStreaming': isStreaming,
+      if (isError != null) 'isError': isError,
     };
   }
 }
@@ -202,7 +202,7 @@ class ReadResourceResult {
   Map<String, dynamic> toJson() {
     return {
       'content': content,
-      'mime_type': mimeType,
+      'mimeType': mimeType,
       'contents': contents.map((c) => c.toJson()).toList(),
     };
   }
@@ -450,7 +450,7 @@ class CreateMessageResult {
       case 'image':
         content = ImageContent(
           url: contentMap['url'],
-          mimeType: contentMap['mime_type'],
+          mimeType: contentMap['mimeType'],
         );
         break;
       case 'resource':
@@ -523,13 +523,13 @@ class ServerHealth {
 
   Map<String, dynamic> toJson() {
     return {
-      'is_running': isRunning,
-      'connected_sessions': connectedSessions,
-      'registered_tools': registeredTools,
-      'registered_resources': registeredResources,
-      'registered_prompts': registeredPrompts,
-      'start_time': startTime.toIso8601String(),
-      'uptime_seconds': uptime.inSeconds,
+      'isRunning': isRunning,
+      'connectedSessions': connectedSessions,
+      'registeredTools': registeredTools,
+      'registeredResources': registeredResources,
+      'registeredPrompts': registeredPrompts,
+      'startTime': startTime.toIso8601String(),
+      'uptimeSeconds': uptime.inSeconds,
       'metrics': metrics,
     };
   }
@@ -575,11 +575,11 @@ class PendingOperation {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'session_id': sessionId,
+      'sessionId': sessionId,
       'type': type,
-      'created_at': createdAt.toIso8601String(),
-      'is_cancelled': isCancelled,
-      if (requestId != null) 'request_id': requestId,
+      'createdAt': createdAt.toIso8601String(),
+      'isCancelled': isCancelled,
+      if (requestId != null) 'requestId': requestId,
     };
   }
 }
@@ -620,8 +620,8 @@ class ClientSession {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'connected_at': connectedAt.toIso8601String(),
-      'protocol_version': negotiatedProtocolVersion,
+      'connectedAt': connectedAt.toIso8601String(),
+      'protocolVersion': negotiatedProtocolVersion,
       'initialized': isInitialized,
       'capabilities': capabilities,
       'roots': roots.map((r) => r.toJson()).toList(),

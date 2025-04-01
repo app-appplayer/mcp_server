@@ -2,6 +2,8 @@ import 'package:test/test.dart';
 import 'package:mcp_server/mcp_server.dart';
 
 void main() {
+  final Logger _logger = Logger.getLogger('mcp_server.server');
+  _logger.setLevel(LogLevel.debug);
   group('McpServer', () {
     test('createServer returns a Server instance', () {
       final server = McpServer.createServer(
@@ -29,7 +31,7 @@ void main() {
     });
 
     test('debug does not throw', () {
-      expect(() => log.debug('Debug test message'), returnsNormally);
+      expect(() => _logger.debug('Debug test message'), returnsNormally);
     });
   });
 }

@@ -8,6 +8,8 @@ import '../../logger.dart';
 import '../models/models.dart';
 import '../transport/transport.dart';
 
+final Logger _logger = Logger.getLogger('mcp_server.server');
+
 /// Callback type for tool execution progress updates
 typedef ProgressCallback = void Function(double progress, String message);
 
@@ -124,7 +126,7 @@ class Server implements ServerInterface {
       try {
         await _processMessage(message.sessionId, message);
       } catch (e) {
-        log.error('Error processing message: $e');
+        _logger.error('Error processing message: $e');
         _sendErrorResponse(message.sessionId, message.id, ErrorCode.internalError, 'Internal error: $e');
       }
     });
@@ -141,7 +143,7 @@ class Server implements ServerInterface {
     );
 
     _sessions[sessionId] = session;
-    log.debug('Created session: $sessionId');
+    _logger.debug('Created session: $sessionId');
 
     return sessionId;
   }
@@ -149,7 +151,7 @@ class Server implements ServerInterface {
   /// Remove a client session
   void _removeSession(String sessionId) {
     _sessions.remove(sessionId);
-    log.debug('Removed session: $sessionId');
+    _logger.debug('Removed session: $sessionId');
 
     // Remove session from resource subscriptions
     for (final uri in _resourceSubscriptions.keys) {
@@ -224,10 +226,10 @@ class Server implements ServerInterface {
     required Map<String, dynamic> inputSchema,
     required ToolHandler handler,
   }) {
-    log.debug('Adding tool: $name');
+    _logger.debug('Adding tool: $name');
 
     if (_tools.containsKey(name)) {
-      log.debug('Tool with name "$name" already exists');
+      _logger.debug('Tool with name "$name" already exists');
       throw McpError('Tool with name "$name" already exists');
     }
 
@@ -240,8 +242,8 @@ class Server implements ServerInterface {
     _tools[name] = tool;
     _toolHandlers[name] = handler;
 
-    log.debug('Tool added successfully: $name');
-    log.debug('Total tools: ${_tools.length}');
+    _logger.debug('Tool added successfully: $name');
+    _logger.debug('Total tools: ${_tools.length}');
 
     // Notify clients about tool changes if connected and supported
     if (isConnected && capabilities.tools && capabilities.toolsListChanged) {
@@ -418,7 +420,7 @@ class Server implements ServerInterface {
     final session = _sessions[sessionId];
     if (session != null) {
       session.roots = roots;
-      log.debug('Stored ${roots.length} client roots for session $sessionId');
+      _logger.debug('Stored ${roots.length} client roots for session $sessionId');
     }
   }
 
@@ -521,7 +523,7 @@ class Server implements ServerInterface {
   /// Handle transport disconnection
   void _onDisconnect() {
     _transport = null;
-    log.debug('Transport disconnected');
+    _logger.debug('Transport disconnected');
   }
 
   /// Handle incoming messages from the transport
@@ -533,7 +535,7 @@ class Server implements ServerInterface {
       message.sessionId = sessionId; // Attach session ID
       _messageController.add(message);
     } catch (e) {
-      log.error('Parse error: $e');
+      _logger.error('Parse error: $e');
       _sendErrorResponse(sessionId, null, ErrorCode.parseError, 'Parse error: $e');
     }
   }
@@ -560,8 +562,8 @@ class Server implements ServerInterface {
       incrementMetric('messages.success');
     } catch (e, stackTrace) {
       incrementMetric('messages.errors');
-      log.error('Error processing message: $e');
-      log.debug('Stacktrace: $stackTrace');
+      _logger.error('Error processing message: $e');
+      _logger.debug('Stacktrace: $stackTrace');
 
       _sendErrorResponse(
           sessionId,
@@ -576,13 +578,13 @@ class Server implements ServerInterface {
 
   /// Handle a JSON-RPC notification
   Future<void> _handleNotification(String sessionId, JsonRpcMessage notification) async {
-    log.debug('[Flutter MCP] Received notification: ${notification.method}');
+    _logger.debug('[Flutter MCP] Received notification: ${notification.method}');
 
     // Handle client notifications
     switch (notification.method) {
       case 'initialized':
       case 'notifications/initialized':
-        log.debug('[Flutter MCP] Client initialized notification received');
+        _logger.debug('[Flutter MCP] Client initialized notification received');
         final session = _sessions[sessionId];
         if (session != null) {
           session.isInitialized = true;
@@ -591,7 +593,7 @@ class Server implements ServerInterface {
         break;
 
       case 'client/ready':
-        log.debug('[Flutter MCP] Client ready notification received');
+        _logger.debug('[Flutter MCP] Client ready notification received');
         break;
 
       case 'notifications/roots/list_changed':
@@ -613,7 +615,7 @@ class Server implements ServerInterface {
         break;
 
       default:
-        log.debug('[Flutter MCP] Unknown notification: ${notification.method}');
+        _logger.debug('[Flutter MCP] Unknown notification: ${notification.method}');
         break;
     }
   }
@@ -794,25 +796,25 @@ class Server implements ServerInterface {
 
   /// Handle tools/list request
   Future<void> _handleToolsList(String sessionId, JsonRpcMessage request) async {
-    log.debug('Tools listing requested');
+    _logger.debug('Tools listing requested');
 
     if (!capabilities.tools) {
-      log.debug('Tools capability not supported');
+      _logger.debug('Tools capability not supported');
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Tools capability not supported');
       return;
     }
 
     try {
       final toolsList = _tools.values.map((tool) {
-        log.debug('Processing tool: ${tool.name}');
+        _logger.debug('Processing tool: ${tool.name}');
         return tool.toJson();
       }).toList();
 
-      log.debug('Sending tools list: $toolsList');
+      _logger.debug('Sending tools list: $toolsList');
       _sendResponse(sessionId, request.id, {'tools': toolsList});
     } catch (e, stackTrace) {
-      log.error('Error in tools list: $e');
-      log.debug('Stacktrace: $stackTrace');
+      _logger.error('Error in tools list: $e');
+      _logger.debug('Stacktrace: $stackTrace');
       _sendErrorResponse(
         sessionId,
         request.id,
@@ -1175,13 +1177,13 @@ class Server implements ServerInterface {
   Future<void> _handleSamplingResponse(String sessionId, JsonRpcMessage notification) async {
     final requestId = notification.params?['request_id'];
     if (requestId == null) {
-      log.error('Received sampling response without request_id');
+      _logger.error('Received sampling response without request_id');
       return;
     }
 
     final completer = _pendingSamplingRequests[requestId];
     if (completer == null) {
-      log.error('Received sampling response for unknown request: $requestId');
+      _logger.error('Received sampling response for unknown request: $requestId');
       return;
     }
 
@@ -1229,7 +1231,7 @@ class Server implements ServerInterface {
   void _sendResponse(String sessionId, dynamic id, dynamic result) {
     final session = _sessions[sessionId];
     if (session == null) {
-      log.error('Attempted to send response to non-existent session: $sessionId');
+      _logger.error('Attempted to send response to non-existent session: $sessionId');
       return;
     }
 
@@ -1246,14 +1248,14 @@ class Server implements ServerInterface {
   void _sendErrorResponse(String sessionId, dynamic id, int code, String message, [Map<String, dynamic>? data]) {
     final session = _sessions[sessionId];
     if (session == null) {
-      log.error('Attempted to send error to non-existent session: $sessionId');
+      _logger.error('Attempted to send error to non-existent session: $sessionId');
       return;
     }
 
     // Log the error
-    log.error('Sending error response: $code - $message');
+    _logger.error('Sending error response: $code - $message');
     if (data != null) {
-      log.debug('Error data: $data');
+      _logger.debug('Error data: $data');
     }
 
     final response = {
@@ -1276,7 +1278,7 @@ class Server implements ServerInterface {
   void _sendNotification(String sessionId, String method, Map<String, dynamic> params) {
     final session = _sessions[sessionId];
     if (session == null) {
-      log.error('Attempted to send notification to non-existent session: $sessionId');
+      _logger.error('Attempted to send notification to non-existent session: $sessionId');
       return;
     }
 
