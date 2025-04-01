@@ -104,7 +104,16 @@ class Server implements ServerInterface {
   /// Connect the server to a transport
   void connect(ServerTransport transport) {
     if (_transport != null) {
-      throw McpError('Server is already connected to a transport');
+      _logger.debug('Server already has a transport connected');
+
+      // Handle STDIO transport specifically
+      if (transport is StdioServerTransport && _transport is StdioServerTransport) {
+        _logger.debug('Attempting to connect another STDIO transport - reusing existing connection');
+        // Use existing transport instead of the new one
+        transport = _transport as StdioServerTransport;
+      } else {
+        throw McpError('Server is already connected to a transport');
+      }
     }
 
     _transport = transport;
@@ -112,23 +121,41 @@ class Server implements ServerInterface {
     // Create a new session
     final sessionId = _createSession(transport);
 
-    transport.onMessage.listen((rawMessage) {
-      _handleMessage(sessionId, rawMessage);
-    });
+    try {
+      transport.onMessage.listen((rawMessage) {
+        _handleMessage(sessionId, rawMessage);
+      }, onError: (error) {
+        _logger.error('Error from transport message stream: $error');
+      });
 
-    transport.onClose.then((_) {
-      _removeSession(sessionId);
-      _onDisconnect();
-    });
+      transport.onClose.then((_) {
+        _removeSession(sessionId);
+        _onDisconnect();
+      }).catchError((error) {
+        _logger.error('Transport close error: $error');
+        _removeSession(sessionId);
+        _onDisconnect();
+      });
+    } catch (e) {
+      _logger.error('Failed to setup transport listeners: $e');
+    }
 
-    // Set up server handlers
+    // Set up message processing with better error handling
     _messageController.stream.listen((message) async {
       try {
         await _processMessage(message.sessionId, message);
-      } catch (e) {
+      } catch (e, stackTrace) {
         _logger.error('Error processing message: $e');
-        _sendErrorResponse(message.sessionId, message.id, ErrorCode.internalError, 'Internal error: $e');
+        _logger.debug('Stack trace: $stackTrace');
+
+        try {
+          _sendErrorResponse(message.sessionId, message.id, ErrorCode.internalError, 'Internal error: $e');
+        } catch (sendError) {
+          _logger.error('Failed to send error response: $sendError');
+        }
       }
+    }, onError: (error) {
+      _logger.error('Error in message stream: $error');
     });
   }
 
@@ -1271,7 +1298,12 @@ class Server implements ServerInterface {
       response['error']['data'] = data;
     }
 
-    session.transport.send(response);
+    try {
+      session.transport.send(response);
+    } catch (e) {
+      _logger.error('Failed to send error response: $e');
+      // Instead of crashing, just log the error
+    }
   }
 
   /// Send a JSON-RPC notification to specific session

@@ -22,52 +22,80 @@ abstract class ServerTransport {
 }
 
 /// Transport implementation using standard input/output streams
+// StdioServerTransport class with singleton pattern and improved error handling
 class StdioServerTransport implements ServerTransport {
   final _messageController = StreamController<dynamic>.broadcast();
   final _closeCompleter = Completer<void>();
   StreamSubscription? _stdinSubscription;
 
-  StdioServerTransport() {
+  late final IOSink _stdoutSink;
+
+  // Static instance for singleton pattern
+  static StdioServerTransport? _instance;
+
+  // Flag to check if the transport has been closed
+  bool _isClosed = false;
+
+  // Factory constructor to implement singleton pattern
+  factory StdioServerTransport() {
+    if (_instance != null) {
+      _logger.debug('[Flutter MCP] Reusing existing StdioServerTransport instance');
+      return _instance!;
+    }
+
+    _logger.debug('[Flutter MCP] Creating new StdioServerTransport instance');
+    _instance = StdioServerTransport._internal();
+    return _instance!;
+  }
+
+  // Private constructor for singleton implementation
+  StdioServerTransport._internal() {
+    _stdoutSink = IOSink(stdout);
     _initialize();
   }
 
   void _initialize() {
     _logger.debug('[Flutter MCP] Initializing STDIO transport');
 
-    _stdinSubscription = stdin
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .where((line) => line.isNotEmpty)
-        .map((line) {
-      try {
-        _logger.debug('[Flutter MCP] Raw received line: $line');
-        final parsedMessage = jsonDecode(line);
-        _logger.debug('[Flutter MCP] Parsed message: $parsedMessage');
-        return parsedMessage;
-      } catch (e) {
-        _logger.debug('[Flutter MCP] JSON parsing error: $e');
-        _logger.debug('[Flutter MCP] Problematic line: $line');
-        return null;
-      }
-    })
-        .where((message) => message != null)
-        .listen(
-          (message) {
-        _logger.debug('[Flutter MCP] Processing message: $message');
-        if (!_messageController.isClosed) {
-          _messageController.add(message);
+    try {
+      _stdinSubscription = stdin
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .where((line) => line.isNotEmpty)
+          .map((line) {
+        try {
+          _logger.debug('[Flutter MCP] Raw received line: $line');
+          final parsedMessage = jsonDecode(line);
+          _logger.debug('[Flutter MCP] Parsed message: $parsedMessage');
+          return parsedMessage;
+        } catch (e) {
+          _logger.debug('[Flutter MCP] JSON parsing error: $e');
+          _logger.debug('[Flutter MCP] Problematic line: $line');
+          return null;
         }
-      },
-      onError: (error) {
-        _logger.debug('[Flutter MCP] Stream error: $error');
-        _handleTransportError(error);
-      },
-      onDone: () {
-        _logger.debug('[Flutter MCP] stdin stream done');
-        _handleStreamClosure();
-      },
-      cancelOnError: false,
-    );
+      })
+          .where((message) => message != null)
+          .listen(
+            (message) {
+          _logger.debug('[Flutter MCP] Processing message: $message');
+          if (!_messageController.isClosed) {
+            _messageController.add(message);
+          }
+        },
+        onError: (error) {
+          _logger.debug('[Flutter MCP] Stream error: $error');
+          _handleTransportError(error);
+        },
+        onDone: () {
+          _logger.debug('[Flutter MCP] stdin stream done');
+          _handleStreamClosure();
+        },
+        cancelOnError: false,
+      );
+    } catch (e) {
+      _logger.debug('[Flutter MCP] Error initializing STDIO transport: $e');
+      _handleTransportError(e);
+    }
   }
 
   void _handleTransportError(dynamic error) {
@@ -87,9 +115,18 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _cleanup() {
+    if (_isClosed) return;
+
+    _isClosed = true;
     _stdinSubscription?.cancel();
+
     if (!_messageController.isClosed) {
       _messageController.close();
+    }
+    try {
+      _stdoutSink.close();
+    } catch (e) {
+      _logger.debug('Error closing stdout sink: $e');
     }
   }
 
@@ -101,19 +138,33 @@ class StdioServerTransport implements ServerTransport {
 
   @override
   void send(dynamic message) {
+    if (_isClosed) {
+      _logger.debug('[Flutter MCP] Attempted to send message on closed transport');
+      return;
+    }
+
     try {
       final jsonMessage = jsonEncode(message);
       _logger.debug('Encoding message: $message');
       _logger.debug('Encoded JSON: $jsonMessage');
 
-      stdout.writeln(jsonMessage);
-      stdout.flush();
-
-      _logger.debug('[MCP] Sent message: $jsonMessage');
+      // Check if stdout is available and not bound
+      try {
+        _stdoutSink.writeln(jsonMessage);
+        _logger.debug('[MCP] Sent message: $jsonMessage');
+      } catch (e) {
+        // If there's a StreamSink binding issue, handle gracefully
+        if (e.toString().contains('StreamSink is bound')) {
+          _logger.debug('[MCP] StreamSink binding issue detected: $e');
+          _handleTransportError('StreamSink binding conflict');
+        } else {
+          rethrow;
+        }
+      }
     } catch (e) {
-      _logger.debug('Error encoding message: $e');
+      _logger.debug('Error encoding or sending message: $e');
       _logger.debug('Original message: $message');
-      rethrow;
+      // Don't rethrow to prevent process crash
     }
   }
 
@@ -121,6 +172,10 @@ class StdioServerTransport implements ServerTransport {
   void close() {
     _logger.debug('[MCP] Closing StdioServerTransport');
     _cleanup();
+    // Clear singleton instance on close
+    if (_instance == this) {
+      _instance = null;
+    }
   }
 }
 
