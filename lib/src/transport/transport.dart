@@ -39,11 +39,11 @@ class StdioServerTransport implements ServerTransport {
   // Factory constructor to implement singleton pattern
   factory StdioServerTransport() {
     if (_instance != null) {
-      _logger.debug('[Flutter MCP] Reusing existing StdioServerTransport instance');
+      _logger.debug('Reusing existing StdioServerTransport instance');
       return _instance!;
     }
 
-    _logger.debug('[Flutter MCP] Creating new StdioServerTransport instance');
+    _logger.debug('Creating new StdioServerTransport instance');
     _instance = StdioServerTransport._internal();
     return _instance!;
   }
@@ -55,7 +55,7 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _initialize() {
-    _logger.debug('[Flutter MCP] Initializing STDIO transport');
+    _logger.debug('Initializing STDIO transport');
 
     try {
       _stdinSubscription = stdin
@@ -64,42 +64,42 @@ class StdioServerTransport implements ServerTransport {
           .where((line) => line.isNotEmpty)
           .map((line) {
         try {
-          _logger.debug('[Flutter MCP] Raw received line: $line');
+          _logger.debug('Raw received line: $line');
           final parsedMessage = jsonDecode(line);
-          _logger.debug('[Flutter MCP] Parsed message: $parsedMessage');
+          _logger.debug('Parsed message: $parsedMessage');
           return parsedMessage;
         } catch (e) {
-          _logger.debug('[Flutter MCP] JSON parsing error: $e');
-          _logger.debug('[Flutter MCP] Problematic line: $line');
+          _logger.debug('JSON parsing error: $e');
+          _logger.debug('Problematic line: $line');
           return null;
         }
       })
           .where((message) => message != null)
           .listen(
             (message) {
-          _logger.debug('[Flutter MCP] Processing message: $message');
+          _logger.debug('Processing message: $message');
           if (!_messageController.isClosed) {
             _messageController.add(message);
           }
         },
         onError: (error) {
-          _logger.debug('[Flutter MCP] Stream error: $error');
+          _logger.debug('Stream error: $error');
           _handleTransportError(error);
         },
         onDone: () {
-          _logger.debug('[Flutter MCP] stdin stream done');
+          _logger.debug('stdin stream done');
           _handleStreamClosure();
         },
         cancelOnError: false,
       );
     } catch (e) {
-      _logger.debug('[Flutter MCP] Error initializing STDIO transport: $e');
+      _logger.debug('Error initializing STDIO transport: $e');
       _handleTransportError(e);
     }
   }
 
   void _handleTransportError(dynamic error) {
-    _logger.debug('[Flutter MCP] Transport error: $error');
+    _logger.debug('Transport error: $error');
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.completeError(error);
     }
@@ -107,7 +107,7 @@ class StdioServerTransport implements ServerTransport {
   }
 
   void _handleStreamClosure() {
-    _logger.debug('[Flutter MCP] Handling stream closure');
+    _logger.debug('Handling stream closure');
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.complete();
     }
@@ -139,7 +139,7 @@ class StdioServerTransport implements ServerTransport {
   @override
   void send(dynamic message) {
     if (_isClosed) {
-      _logger.debug('[Flutter MCP] Attempted to send message on closed transport');
+      _logger.debug('Attempted to send message on closed transport');
       return;
     }
 
@@ -151,11 +151,11 @@ class StdioServerTransport implements ServerTransport {
       // Check if stdout is available and not bound
       try {
         _stdoutSink.writeln(jsonMessage);
-        _logger.debug('[MCP] Sent message: $jsonMessage');
+        _logger.debug('Sent message: $jsonMessage');
       } catch (e) {
         // If there's a StreamSink binding issue, handle gracefully
         if (e.toString().contains('StreamSink is bound')) {
-          _logger.debug('[MCP] StreamSink binding issue detected: $e');
+          _logger.debug('StreamSink binding issue detected: $e');
           _handleTransportError('StreamSink binding conflict');
         } else {
           rethrow;
@@ -170,7 +170,7 @@ class StdioServerTransport implements ServerTransport {
 
   @override
   void close() {
-    _logger.debug('[MCP] Closing StdioServerTransport');
+    _logger.debug('Closing StdioServerTransport');
     _cleanup();
     // Clear singleton instance on close
     if (_instance == this) {
@@ -206,18 +206,18 @@ class SseServerTransport implements ServerTransport {
   Future<void> _initialize() async {
     try {
       _server = await _startServer(port);
-      _logger.debug('[MCP] Server listening on port $port');
+      _logger.debug('Server listening on port $port');
     } catch (e) {
-      _logger.debug('[MCP] Failed to start server on port $port: $e');
+      _logger.debug('Failed to start server on port $port: $e');
 
       if (fallbackPorts != null && fallbackPorts!.isNotEmpty) {
         for (final fallbackPort in fallbackPorts!) {
           try {
             _server = await _startServer(fallbackPort);
-            _logger.debug('[MCP] Server listening on fallback port $fallbackPort');
+            _logger.debug('Server listening on fallback port $fallbackPort');
             break;
           } catch (e) {
-            _logger.debug('[MCP] Failed to start server on fallback port $fallbackPort: $e');
+            _logger.debug('Failed to start server on fallback port $fallbackPort: $e');
           }
         }
       }
@@ -289,9 +289,19 @@ class SseServerTransport implements ServerTransport {
     request.response.done.then((_) {
       _logger.debug('[SSE] Client disconnected: $sessionId');
       _sessionClients.remove(sessionId);
+
+      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+        _logger.info('[SSE] All clients disconnected, completing onClose');
+        _closeCompleter.complete();
+      }
     }).catchError((e) {
       _logger.debug('[SSE] Client error: $sessionId - $e');
       _sessionClients.remove(sessionId);
+
+      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+        _logger.info('[SSE] All clients disconnected (after error), completing onClose');
+        _closeCompleter.complete();
+      }
     });
   }
 
@@ -370,14 +380,31 @@ class SseServerTransport implements ServerTransport {
     final jsonString = jsonEncode(message);
     final eventData = 'event: message\ndata: $jsonString\n\n';
 
-    for (final client in List.from(_sessionClients.values)) {
-      try {
-        client
-          ..write(eventData)
-          ..flush();
-      } catch (e) {
-        _logger.debug('[SSE] Error sending message: $e');
+    // Store sessions to remove if sending fails
+    final toRemove = <String>[];
+
+    _sessionClients.forEach((sessionId, client) {
+      final success = _sendToClient(client, eventData);
+      if (!success) {
+        _logger.debug('[SSE] Removing disconnected client: $sessionId');
+        toRemove.add(sessionId);
       }
+    });
+
+    for (final id in toRemove) {
+      _sessionClients.remove(id);
+    }
+  }
+
+  /// Safely sends data to a client, returns false if an error occurred
+  bool _sendToClient(HttpResponse client, String data) {
+    try {
+      client.write(data);
+      client.flush();
+      return true;
+    } catch (e) {
+      _logger.debug('[SSE] Failed to send to client: $e');
+      return false;
     }
   }
 
@@ -393,40 +420,6 @@ class SseServerTransport implements ServerTransport {
 
     if (!_closeCompleter.isCompleted) {
       _closeCompleter.complete();
-    }
-  }
-}
-
-/// Mock transport for testing
-class MockTransport implements ServerTransport {
-  final void Function(dynamic)? onSendCallback;
-  final _messageController = StreamController<dynamic>.broadcast();
-  final _closeCompleter = Completer<void>();
-
-  MockTransport({this.onSendCallback});
-
-  @override
-  Stream<dynamic> get onMessage => _messageController.stream;
-
-  @override
-  Future<void> get onClose => _closeCompleter.future;
-
-  @override
-  void send(dynamic message) {
-    if (onSendCallback != null) {
-      onSendCallback!(message);
-    }
-  }
-
-  @override
-  void close() {
-    _closeCompleter.complete();
-    _messageController.close();
-  }
-
-  void receiveMessage(dynamic message) {
-    if (!_messageController.isClosed) {
-      _messageController.add(message);
     }
   }
 }

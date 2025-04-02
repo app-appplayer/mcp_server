@@ -42,10 +42,10 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     // Create transport based on mode
     ServerTransport transport;
     if (mode == 'stdio') {
-      _logger.debug('[Flutter MCP] Starting server in STDIO mode');
+      _logger.debug('Starting server in STDIO mode');
       transport = McpServer.createStdioTransport();
     } else {
-      _logger.debug('[Flutter MCP] Starting server in SSE mode on port $port');
+      _logger.debug('Starting server in SSE mode on port $port');
       transport = McpServer.createSseTransport(
         endpoint: '/sse',
         messagesEndpoint: '/message',
@@ -56,7 +56,7 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
 
     // Set up transport closure handling
     transport.onClose.then((_) {
-      _logger.debug('[Flutter MCP] Transport closed, shutting down.');
+      _logger.debug('Transport closed, shutting down.');
       exit(0);
     });
 
@@ -67,16 +67,16 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     server.sendLog(McpLogLevel.info, 'Flutter MCP Server started successfully');
 
     if (mode == 'sse') {
-      _logger.debug('[Flutter MCP] SSE Server is running on:');
+      _logger.debug('SSE Server is running on:');
       _logger.debug('- SSE endpoint:     http://localhost:$port/sse');
       _logger.debug('- Message endpoint: http://localhost:$port/message');
-      _logger.debug('[Flutter MCP] Press Ctrl+C to stop the server');
+      _logger.debug('Press Ctrl+C to stop the server');
     } else {
-      _logger.debug('[Flutter MCP] STDIO Server initialized and connected to transport');
+      _logger.debug('STDIO Server initialized and connected to transport');
     }
 
   } catch (e, stackTrace) {
-    _logger.debug('[Flutter MCP] Error initializing MCP server: $e');
+    _logger.debug('Error initializing MCP server: $e');
     _logger.debug(stackTrace as String);
     exit(1);
   }

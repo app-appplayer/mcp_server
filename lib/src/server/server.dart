@@ -605,13 +605,13 @@ class Server implements ServerInterface {
 
   /// Handle a JSON-RPC notification
   Future<void> _handleNotification(String sessionId, JsonRpcMessage notification) async {
-    _logger.debug('[Flutter MCP] Received notification: ${notification.method}');
+    _logger.debug('Received notification: ${notification.method}');
 
     // Handle client notifications
     switch (notification.method) {
       case 'initialized':
       case 'notifications/initialized':
-        _logger.debug('[Flutter MCP] Client initialized notification received');
+        _logger.debug('Client initialized notification received');
         final session = _sessions[sessionId];
         if (session != null) {
           session.isInitialized = true;
@@ -620,7 +620,7 @@ class Server implements ServerInterface {
         break;
 
       case 'client/ready':
-        _logger.debug('[Flutter MCP] Client ready notification received');
+        _logger.debug('Client ready notification received');
         break;
 
       case 'notifications/roots/list_changed':
@@ -642,7 +642,7 @@ class Server implements ServerInterface {
         break;
 
       default:
-        _logger.debug('[Flutter MCP] Unknown notification: ${notification.method}');
+        _logger.debug('Unknown notification: ${notification.method}');
         break;
     }
   }

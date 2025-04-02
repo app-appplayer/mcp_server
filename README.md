@@ -31,7 +31,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_server: ^0.1.2
+  mcp_server: ^0.1.7
 ```
 
 Or install via command line:

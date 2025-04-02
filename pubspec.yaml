@@ -1,6 +1,6 @@
 name: mcp_server
 description: Dart plugin for implementing Model Context Protocol (MCP) servers. Provides tools to build MCP servers that can expose data, functionality, and interaction patterns to LLM applications.
-version: 0.1.6
+version: 0.1.7
 homepage: https://github.com/app-appplayer/mcp_server
 repository: https://github.com/app-appplayer/mcp_server
 issue_tracker: https://github.com/app-appplayer/mcp_server/issues
@@ -8,7 +8,6 @@ issue_tracker: https://github.com/app-appplayer/mcp_server/issues
 environment:
   sdk: ^3.7.2
 
-# Add regular dependencies here.
 dependencies:
   http: ^1.1.0
   json_annotation: ^4.9.0
