@@ -17,13 +17,13 @@ typedef ProgressCallback = void Function(double progress, String message);
 typedef IsCancelledCheck = bool Function();
 
 /// Type definition for tool handler functions with cancellation and progress reporting
-typedef ToolHandler = Future<CallToolResult> Function(Map<String, dynamic> arguments);
+typedef ToolHandler = Future<dynamic> Function(Map<String, dynamic> arguments);
 
 /// Type definition for resource handler functions
-typedef ResourceHandler = Future<ReadResourceResult> Function(String uri, Map<String, dynamic> params);
+typedef ResourceHandler = Future<dynamic> Function(String uri, Map<String, dynamic> params);
 
 /// Type definition for prompt handler functions
-typedef PromptHandler = Future<GetPromptResult> Function(Map<String, dynamic> arguments);
+typedef PromptHandler = Future<dynamic> Function(Map<String, dynamic> arguments);
 
 /// Main MCP Server class that handles all server-side protocol operations
 class Server implements ServerInterface {
