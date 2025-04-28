@@ -499,3 +499,12 @@ Please file any issues, bugs, or feature requests in our [issue tracker](https:/
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+
+## 🙌 Support Our Work!
+
+If you find this project helpful, please consider supporting us on Patreon.
+
+[![Support on Patreon](https://img.shields.io/badge/Support%20on-Patreon-orange?logo=patreon)](https://www.patreon.com/mcpdevstudio)
+
+Your support helps us maintain and improve the project!
