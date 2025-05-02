@@ -91,6 +91,18 @@ class Server implements ServerInterface {
   /// Stream controller for handling incoming messages
   final _messageController = StreamController<JsonRpcMessage>.broadcast();
 
+  /// Stream controllers for session events
+  final _connectStreamController = StreamController<ClientSession>.broadcast();
+  final _disconnectStreamController = StreamController<ClientSession>.broadcast();
+
+  /// Stream of session connection events
+  @override
+  Stream<ClientSession> get onConnect => _connectStreamController.stream;
+
+  /// Stream of session disconnection events
+  @override
+  Stream<ClientSession> get onDisconnect => _disconnectStreamController.stream;
+
   /// Whether the server is currently connected
   bool get isConnected => _transport != null;
 
@@ -172,11 +184,22 @@ class Server implements ServerInterface {
     _sessions[sessionId] = session;
     _logger.debug('Created session: $sessionId');
 
+    // Emit connection event
+    _connectStreamController.add(session);
+
     return sessionId;
   }
 
   /// Remove a client session
   void _removeSession(String sessionId) {
+    final session = _sessions[sessionId];
+    if (session != null) {
+      // Only emit event if the stream controller is not closed
+      if (!_disconnectStreamController.isClosed) {
+        _disconnectStreamController.add(session);
+      }
+    }
+
     _sessions.remove(sessionId);
     _logger.debug('Removed session: $sessionId');
 
@@ -551,6 +574,16 @@ class Server implements ServerInterface {
   void _onDisconnect() {
     _transport = null;
     _logger.debug('Transport disconnected');
+  }
+
+  /// Dispose server resources
+  void dispose() {
+    disconnect();
+
+    // Close stream controllers
+    _messageController.close();
+    _connectStreamController.close();
+    _disconnectStreamController.close();
   }
 
   /// Handle incoming messages from the transport
@@ -1466,6 +1499,12 @@ abstract class ServerInterface {
 
   /// Server capabilities configuration
   ServerCapabilities get capabilities;
+
+  /// Stream of session connection events
+  Stream<ClientSession> get onConnect;
+
+  /// Stream of session disconnection events
+  Stream<ClientSession> get onDisconnect;
 
   /// Get all registered tools
   List<Tool> getTools();

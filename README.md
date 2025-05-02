@@ -39,7 +39,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_server: ^0.1.7
+  mcp_server: ^0.1.9
 ```
 
 Or install via command line:
@@ -366,6 +366,37 @@ Be specific in your feedback and provide code examples when suggesting changes.
   },
 );
 ```
+
+## Session Management
+
+The server provides a listener system for handling client session events:
+
+```dart
+// Register session connection listener
+server.addSessionListener('connected', (session) {
+  logger.info('Client connected: ${session.id}');
+  // Perform session initialization
+});
+
+// Register session disconnection listener
+server.addSessionListener('disconnected', (session) {
+  logger.info('Client disconnected: ${session.id}');
+  // Perform cleanup tasks
+});
+```
+
+This feature allows you to:
+- Monitor client connections and disconnections
+- Automate session-specific initialization and cleanup
+- Manage session resources
+- Track connection statistics and logging
+
+The `ClientSession` object contains useful information:
+- Session ID
+- Connection timestamp
+- Protocol version
+- Client capabilities
+- Client root directories
 
 ## Transport Layers
 
