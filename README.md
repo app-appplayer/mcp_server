@@ -16,6 +16,11 @@ A Dart plugin for implementing [Model Context Protocol (MCP)](https://modelconte
 - Expose data through **Resources**
 - Provide functionality through **Tools**
 - Define interaction patterns through **Prompts**
+- Comprehensive session management with event streams
+- Built-in resource caching for performance optimization
+- Progress reporting and cancellation for long-running operations
+- Extensive logging system with customizable levels and formatting
+- Performance monitoring and metrics tracking
 - Multiple transport layers:
   - Standard I/O for local process communication
   - Server-Sent Events (SSE) for HTTP-based communication
@@ -369,27 +374,25 @@ Be specific in your feedback and provide code examples when suggesting changes.
 
 ## Session Management
 
-The server provides a listener system for handling client session events:
+The MCP Server provides a powerful stream-based system for monitoring client session events:
 
 ```dart
-// Register session connection listener
-server.addSessionListener('connected', (session) {
-  logger.info('Client connected: ${session.id}');
-  // Perform session initialization
+// Create a logger
+final logger = Logger.getLogger('mcp_server.sessions');
+logger.configure(level: LogLevel.info, includeTimestamp: true);
+
+// Listen for client connections
+server.onConnect.listen((session) {
+  logger.info('Client connected', data: {'sessionId': session.id});
+  // Initialize session resources
 });
 
-// Register session disconnection listener
-server.addSessionListener('disconnected', (session) {
-  logger.info('Client disconnected: ${session.id}');
-  // Perform cleanup tasks
+// Listen for client disconnections
+server.onDisconnect.listen((session) {
+  logger.info('Client disconnected', data: {'sessionId': session.id});
+  // Clean up session resources
 });
 ```
-
-This feature allows you to:
-- Monitor client connections and disconnections
-- Automate session-specific initialization and cleanup
-- Manage session resources
-- Track connection statistics and logging
 
 The `ClientSession` object contains useful information:
 - Session ID
@@ -397,6 +400,34 @@ The `ClientSession` object contains useful information:
 - Protocol version
 - Client capabilities
 - Client root directories
+
+### Best Practices for Session Management
+
+1. **Always handle both events**: Listen for both connection and disconnection events to maintain session integrity.
+
+2. **Add error handling to your stream subscriptions**:
+   ```dart
+   server.onConnect.listen(
+     (session) {
+       // Normal event handling
+     },
+     onError: (error) {
+       logger.error('Error in connection stream: $error');
+     },
+   );
+   ```
+
+3. **Cancel subscriptions when no longer needed**:
+   ```dart
+   final subscription = server.onConnect.listen((session) { /* ... */ });
+   
+   // Later, when done:
+   subscription.cancel();
+   ```
+
+4. **Use session events for state management**: Maintain application state based on session events.
+
+5. **Track metrics for monitoring**: Count sessions, durations, and other metrics.
 
 ## Transport Layers
 
@@ -424,21 +455,33 @@ await server.connect(transport);
 
 ## Logging
 
-The package includes a built-in logging utility:
+The package includes a comprehensive logging utility with customizable levels and formatting:
 
 ```dart
-/// Logging
-final Logger _logger = Logger.getLogger('mcp_server.test');
-_logger.setLevel(LogLevel.debug);
+// Create a named logger
+final logger = Logger.getLogger('mcp_server.example');
 
-// Configure logging
-_logger.configure(level: LogLevel.debug, includeTimestamp: true, useColor: true);
+// Configure the logger
+logger.configure(
+  level: LogLevel.debug,          // Show debug messages and above
+  includeTimestamp: true,         // Include timestamps in log messages
+  useColor: true,                 // Use ANSI colors for different log levels
+);
 
-// Log messages at different levels
-_logger.debug('Debugging information');
-_logger.info('Important information');
-_logger.warning('Warning message');
-_logger.error('Error message');
+// Log at different levels
+logger.error('Connection failed: unable to connect to transport');
+logger.warning('Resource cache is approaching capacity limit');
+logger.info('Server started successfully on port 8080');
+logger.debug('Session ${session.id} initialized with protocol version ${session.negotiatedProtocolVersion}');
+
+// Log with structured format
+final operationId = server.registerOperation(sessionId, 'tool:calculator');
+logger.info('Operation registered', data: {
+  'operationId': operationId,
+  'sessionId': sessionId,
+  'type': 'tool:calculator',
+  'timestamp': DateTime.now().toIso8601String(),
+});
 ```
 
 ## MCP Primitives
@@ -453,6 +496,26 @@ The MCP protocol defines three core primitives that servers can implement:
 
 ## Additional Features
 
+### Session Operations
+
+The Server class provides methods for managing long-running operations:
+
+```dart
+// Register operation for cancellation support
+final operationId = server.registerOperation(sessionId, 'longProcess');
+
+// Check if operation is cancelled
+if (server.isOperationCancelled(operationId)) {
+  return CallToolResult(
+    [TextContent(text: 'Operation cancelled')],
+    isError: true
+  );
+}
+
+// Send progress updates
+server.notifyProgress(operationId, 0.5, 'Halfway done');
+```
+
 ### Resource Caching
 
 The server includes built-in caching for resources to improve performance:
@@ -464,10 +527,13 @@ if (cached != null) {
   return cached.content;
 }
 
-// Cache a resource for future use
-server.cacheResource(uri, result, Duration(minutes: 10));
+// Fetch the resource (expensive operation)
+final result = await fetchResource(uri, params);
 
-// Invalidate cache
+// Cache for future use (5 minutes)
+server.cacheResource(uri, result, Duration(minutes: 5));
+
+// Invalidate cache when resource changes
 server.invalidateCache(uri);
 ```
 
@@ -508,17 +574,43 @@ server.addTool(
 The server provides built-in health metrics:
 
 ```dart
-// Get server health information
+// Get server health statistics
 final health = server.getHealth();
-_logger.debug('Server uptime: ${health.uptime.inSeconds} seconds');
-_logger.debug('Connected sessions: ${health.connectedSessions}');
-_logger.debug('Registered tools: ${health.registeredTools}');
+
+final logger = Logger.getLogger('mcp_server.health');
+logger.configure(level: LogLevel.info, includeTimestamp: true);
+
+logger.info('Server Health Summary', data: {
+  'running': health.isRunning,
+  'sessions': health.connectedSessions,
+  'uptime': '${health.uptime.inHours}h ${health.uptime.inMinutes % 60}m',
+  'tools': health.registeredTools,
+  'resources': health.registeredResources,
+});
 
 // Track custom metrics
 server.incrementMetric('api_calls');
 final timer = server.startTimer('operation_duration');
 // ... perform operation
 server.stopTimer('operation_duration');
+```
+
+## Error Handling
+
+The MCP Server library includes standardized error codes and error handling mechanisms:
+
+```dart
+try {
+  // Attempt an operation
+  final result = await performOperation();
+  return CallToolResult([TextContent(text: result)]);
+} catch (e) {
+  // Return an error result
+  return CallToolResult(
+    [TextContent(text: 'Operation failed: ${e.toString()}')],
+    isError: true,
+  );
+}
 ```
 
 ## Examples
