@@ -326,8 +326,12 @@ class SseServerTransport implements ServerTransport {
     response.headers
       ..add('Access-Control-Allow-Origin', '*')
       ..add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+<<<<<<< HEAD
       ..add('Access-Control-Allow-Headers',
           'Content-Type, Authorization, accept, cache-control')
+=======
+      ..add('Access-Control-Allow-Headers', 'Content-Type, Authorization, accept, cache-control')
+>>>>>>> afc9d42 (add web support)
       ..add('Access-Control-Max-Age', '86400');
   }
 
