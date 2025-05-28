@@ -15,13 +15,13 @@ enum MCPContentType {
 
 /// Log levels for MCP protocol
 enum McpLogLevel {
-  debug, // 0
-  info, // 1
+  debug,  // 0
+  info,   // 1
   notice, // 2
   warning, // 3
-  error, // 4
+  error,  // 4
   critical, // 5
-  alert, // 6
+  alert,  // 6
   emergency // 7
 }
 
@@ -141,10 +141,10 @@ class CallToolResult {
   final bool? isError;
 
   CallToolResult(
-    this.content, {
-    this.isStreaming = false,
-    this.isError,
-  });
+      this.content, {
+        this.isStreaming = false,
+        this.isError,
+      });
 
   Map<String, dynamic> toJson() {
     return {
@@ -437,6 +437,7 @@ class CreateMessageResult {
     return result;
   }
 
+
   factory CreateMessageResult.fromJson(Map<String, dynamic> json) {
     final contentMap = json['content'] as Map<String, dynamic>;
     final contentType = contentMap['type'] as String;
@@ -456,7 +457,8 @@ class CreateMessageResult {
         content = ResourceContent(
             uri: contentMap['uri'],
             text: contentMap['text'],
-            blob: contentMap['blob']);
+            blob: contentMap['blob']
+        );
         break;
       default:
         throw FormatException('Unknown content type: $contentType');
@@ -581,7 +583,6 @@ class PendingOperation {
     };
   }
 }
-
 /// Error codes for standardized error handling
 class ErrorCode {
   // Standard JSON-RPC error codes
@@ -609,13 +610,11 @@ class ClientSession {
   String? negotiatedProtocolVersion;
   bool isInitialized = false;
   List<Root> roots = [];
-  Map<String, String> headers;
 
   ClientSession({
     required this.id,
     required this.transport,
     required this.capabilities,
-    this.headers = const {},
   }) : connectedAt = DateTime.now();
 
   Map<String, dynamic> toJson() {
@@ -626,7 +625,6 @@ class ClientSession {
       'initialized': isInitialized,
       'capabilities': capabilities,
       'roots': roots.map((r) => r.toJson()).toList(),
-      'headers': headers,
     };
   }
 }

@@ -7,7 +7,7 @@ final Logger _logger = Logger.getLogger('mcp_server_example');
 
 void main(List<String> args) async {
   _logger.setLevel(LogLevel.debug);
-
+  
   // MCP STDIO Mode
   if (args.contains('--mcp-stdio-mode')) {
     await startMcpServer(mode: 'stdio');
@@ -46,24 +46,12 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
       transport = McpServer.createStdioTransport();
     } else {
       _logger.debug('Starting server in SSE mode on port $port');
-      final sseTransport = McpServer.createSseTransport(
+      transport = McpServer.createSseTransport(
         endpoint: '/sse',
         messagesEndpoint: '/message',
         port: port,
-        fallbackPorts: [
-          port + 1,
-          port + 2,
-          port + 3
-        ], // Try additional ports if needed
+        fallbackPorts: [port + 1, port + 2, port + 3], // Try additional ports if needed
       );
-      // Wire up onSessionCreate to pass headers to server
-      sseTransport.onSessionCreate = (sessionId, headers) {
-        // This assumes you have a way to pass sessionId and headers to server._createSession
-        // You may need to expose a public method or coordinate session creation
-        // For now, just log for demonstration
-        _logger.debug('New SSE session: id=$sessionId, headers=$headers');
-      };
-      transport = sseTransport;
     }
 
     // Set up transport closure handling
@@ -86,6 +74,7 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     } else {
       _logger.debug('STDIO Server initialized and connected to transport');
     }
+
   } catch (e, stackTrace) {
     _logger.debug('Error initializing MCP server: $e');
     _logger.debug(stackTrace as String);
@@ -101,11 +90,14 @@ void _registerTools(Server server) {
     inputSchema: {
       'type': 'object',
       'properties': {
-        'name': {'type': 'string', 'description': 'Name to say hello to'}
+        'name': {
+          'type': 'string',
+          'description': 'Name to say hello to'
+        }
       },
       'required': []
     },
-    handler: (args, session) async {
+    handler: (args) async {
       final name = args['name'] ?? 'world';
       return CallToolResult([TextContent(text: 'Hello, $name!')]);
     },
@@ -123,19 +115,21 @@ void _registerTools(Server server) {
           'enum': ['add', 'subtract', 'multiply', 'divide'],
           'description': 'Mathematical operation to perform'
         },
-        'a': {'type': 'number', 'description': 'First operand'},
-        'b': {'type': 'number', 'description': 'Second operand'}
+        'a': {
+          'type': 'number',
+          'description': 'First operand'
+        },
+        'b': {
+          'type': 'number',
+          'description': 'Second operand'
+        }
       },
       'required': ['operation', 'a', 'b']
     },
-    handler: (args, session) async {
+    handler: (args) async {
       final operation = args['operation'] as String;
-      final a = (args['a'] is int)
-          ? (args['a'] as int).toDouble()
-          : args['a'] as double;
-      final b = (args['b'] is int)
-          ? (args['b'] as int).toDouble()
-          : args['b'] as double;
+      final a = (args['a'] is int) ? (args['a'] as int).toDouble() : args['a'] as double;
+      final b = (args['b'] is int) ? (args['b'] as int).toDouble() : args['b'] as double;
 
       double result;
       switch (operation) {
@@ -163,6 +157,7 @@ void _registerTools(Server server) {
   );
 
   // Date and time tool
+// Date and time tool
   server.addTool(
     name: 'currentDateTime',
     description: 'Get the current date and time',
@@ -177,7 +172,7 @@ void _registerTools(Server server) {
       },
       'required': []
     },
-    handler: (args, session) async {
+    handler: (args) async {
       try {
         _logger.debug("[DateTime Tool] Received args: $args");
 
@@ -198,8 +193,7 @@ void _registerTools(Server server) {
         String result;
         switch (format) {
           case 'date':
-            result =
-                '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+            result = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
             break;
           case 'time':
             try {
@@ -218,9 +212,8 @@ void _registerTools(Server server) {
               result = now.toIso8601String();
             } catch (e) {
               _logger.debug("[DateTime Tool] Error with ISO format: $e");
-              result =
-                  "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} " +
-                      "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
+              result = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} " +
+                  "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
             }
             break;
         }
@@ -232,7 +225,8 @@ void _registerTools(Server server) {
         _logger.debug("[DateTime Tool] Stack trace: $stackTrace");
         return CallToolResult(
             [TextContent(text: "Error getting date/time: $e")],
-            isError: true);
+            isError: true
+        );
       }
     },
   );
@@ -245,8 +239,11 @@ void _registerResources(Server server) {
       name: 'System Information',
       description: 'Detailed information about the current system',
       mimeType: 'application/json',
-      uriTemplate: {'type': 'object', 'properties': {}},
-      handler: (uri, params, session) async {
+      uriTemplate: {
+        'type': 'object',
+        'properties': {}
+      },
+      handler: (uri, params) async {
         final systemInfo = {
           'operatingSystem': Platform.operatingSystem,
           'operatingSystemVersion': Platform.operatingSystemVersion,
@@ -258,19 +255,20 @@ void _registerResources(Server server) {
           'script': Platform.script.toString(),
         };
 
-        final contents = systemInfo.entries
-            .map((entry) => ResourceContent(
-                  uri: 'flutter://system-info/${entry.key}',
-                  text: '${entry.key}: ${entry.value}',
-                ))
-            .toList();
+        final contents = systemInfo.entries.map((entry) =>
+            ResourceContent(
+              uri: 'flutter://system-info/${entry.key}',
+              text: '${entry.key}: ${entry.value}',
+            )
+        ).toList();
 
         return ReadResourceResult(
           content: jsonEncode(systemInfo),
           mimeType: 'application/json',
           contents: contents,
         );
-      });
+      }
+  );
 
   // Environment variables resource
   server.addResource(
@@ -278,22 +276,26 @@ void _registerResources(Server server) {
       name: 'Environment Variables',
       description: 'List of system environment variables',
       mimeType: 'application/json',
-      uriTemplate: {'type': 'object', 'properties': {}},
-      handler: (uri, params, session) async {
+      uriTemplate: {
+        'type': 'object',
+        'properties': {}
+      },
+      handler: (uri, params) async {
         final envVars = Platform.environment;
-        final contents = envVars.entries
-            .map((entry) => ResourceContent(
-                  uri: 'flutter://env-vars/${entry.key}',
-                  text: '${entry.key}: ${entry.value}',
-                ))
-            .toList();
+        final contents = envVars.entries.map((entry) =>
+            ResourceContent(
+              uri: 'flutter://env-vars/${entry.key}',
+              text: '${entry.key}: ${entry.value}',
+            )
+        ).toList();
 
         return ReadResourceResult(
           content: jsonEncode(envVars),
           mimeType: 'application/json',
           contents: contents,
         );
-      });
+      }
+  );
 
   // Sample file resource with URI template
   server.addResource(
@@ -304,10 +306,13 @@ void _registerResources(Server server) {
     uriTemplate: {
       'type': 'object',
       'properties': {
-        'path': {'type': 'string', 'description': 'Path to the file'}
+        'path': {
+          'type': 'string',
+          'description': 'Path to the file'
+        }
       }
     },
-    handler: (uri, params, session) async {
+    handler: (uri, params) async {
       try {
         // Extract path from parameters if not provided in URI
         String? path = params['path'] ?? uri.substring('file://'.length);
@@ -376,7 +381,7 @@ void _registerPrompts(Server server) {
         required: false,
       ),
     ],
-    handler: (args, session) async {
+    handler: (args) async {
       final name = args['name'] as String;
       final formal = args['formal'] as bool? ?? false;
 
@@ -418,7 +423,7 @@ void _registerPrompts(Server server) {
         required: true,
       ),
     ],
-    handler: (args, session) async {
+    handler: (args) async {
       final code = args['code'] as String;
       final language = args['language'] as String;
 
@@ -438,9 +443,8 @@ Be specific in your feedback and provide code examples when suggesting changes.
         ),
         Message(
           role: MessageRole.user.toString().split('.').last,
-          content: TextContent(
-              text:
-                  'Please review this $language code:\n\n```$language\n$code\n```'),
+          content: TextContent(text: 'Please review this $language code:\n\n```$language\n$code\n```')
+          ,
         ),
       ];
 

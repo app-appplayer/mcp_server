@@ -63,35 +63,35 @@ class StdioServerTransport implements ServerTransport {
           .transform(const LineSplitter())
           .where((line) => line.isNotEmpty)
           .map((line) {
-            try {
-              _logger.debug('Raw received line: $line');
-              final parsedMessage = jsonDecode(line);
-              _logger.debug('Parsed message: $parsedMessage');
-              return parsedMessage;
-            } catch (e) {
-              _logger.debug('JSON parsing error: $e');
-              _logger.debug('Problematic line: $line');
-              return null;
-            }
-          })
+        try {
+          _logger.debug('Raw received line: $line');
+          final parsedMessage = jsonDecode(line);
+          _logger.debug('Parsed message: $parsedMessage');
+          return parsedMessage;
+        } catch (e) {
+          _logger.debug('JSON parsing error: $e');
+          _logger.debug('Problematic line: $line');
+          return null;
+        }
+      })
           .where((message) => message != null)
           .listen(
             (message) {
-              _logger.debug('Processing message: $message');
-              if (!_messageController.isClosed) {
-                _messageController.add(message);
-              }
-            },
-            onError: (error) {
-              _logger.debug('Stream error: $error');
-              _handleTransportError(error);
-            },
-            onDone: () {
-              _logger.debug('stdin stream done');
-              _handleStreamClosure();
-            },
-            cancelOnError: false,
-          );
+          _logger.debug('Processing message: $message');
+          if (!_messageController.isClosed) {
+            _messageController.add(message);
+          }
+        },
+        onError: (error) {
+          _logger.debug('Stream error: $error');
+          _handleTransportError(error);
+        },
+        onDone: () {
+          _logger.debug('stdin stream done');
+          _handleStreamClosure();
+        },
+        cancelOnError: false,
+      );
     } catch (e) {
       _logger.debug('Error initializing STDIO transport: $e');
       _handleTransportError(e);
@@ -193,9 +193,6 @@ class SseServerTransport implements ServerTransport {
   HttpServer? _server;
   final _sessionClients = <String, HttpResponse>{};
 
-  // Add a callback to notify when a new session is created
-  void Function(String sessionId, Map<String, String> headers)? onSessionCreate;
-
   SseServerTransport({
     required this.endpoint,
     required this.messagesEndpoint,
@@ -220,8 +217,7 @@ class SseServerTransport implements ServerTransport {
             _logger.debug('Server listening on fallback port $fallbackPort');
             break;
           } catch (e) {
-            _logger.debug(
-                'Failed to start server on fallback port $fallbackPort: $e');
+            _logger.debug('Failed to start server on fallback port $fallbackPort: $e');
           }
         }
       }
@@ -273,18 +269,6 @@ class SseServerTransport implements ServerTransport {
     }
 
     final sessionId = DateTime.now().millisecondsSinceEpoch.toString();
-
-    // Extract headers
-    final headers = <String, String>{};
-    request.headers.forEach((name, values) {
-      headers[name] = values.join(', ');
-    });
-    
-    // Notify server of new session and headers
-    if (onSessionCreate != null) {
-      onSessionCreate!(sessionId, headers);
-    }
-
     _setCorsHeaders(request.response);
     request.response.headers
       ..add('Content-Type', 'text/event-stream')
@@ -315,8 +299,7 @@ class SseServerTransport implements ServerTransport {
       _sessionClients.remove(sessionId);
 
       if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
-        _logger.info(
-            '[SSE] All clients disconnected (after error), completing onClose');
+        _logger.info('[SSE] All clients disconnected (after error), completing onClose');
         _closeCompleter.complete();
       }
     });
@@ -326,12 +309,7 @@ class SseServerTransport implements ServerTransport {
     response.headers
       ..add('Access-Control-Allow-Origin', '*')
       ..add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-<<<<<<< HEAD
-      ..add('Access-Control-Allow-Headers',
-          'Content-Type, Authorization, accept, cache-control')
-=======
       ..add('Access-Control-Allow-Headers', 'Content-Type, Authorization, accept, cache-control')
->>>>>>> afc9d42 (add web support)
       ..add('Access-Control-Max-Age', '86400');
   }
 
@@ -353,8 +331,7 @@ class SseServerTransport implements ServerTransport {
         ..headers.add('Content-Type', 'application/json')
         ..write(jsonEncode({'error': 'Unauthorized or Invalid session'}));
       await request.response.close();
-      _logger.debug(
-          '[SSE] Unauthorized message attempt with invalid sessionId: $sessionId');
+      _logger.debug('[SSE] Unauthorized message attempt with invalid sessionId: $sessionId');
       return;
     }
 

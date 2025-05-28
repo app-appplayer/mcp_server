@@ -17,16 +17,13 @@ typedef ProgressCallback = void Function(double progress, String message);
 typedef IsCancelledCheck = bool Function();
 
 /// Type definition for tool handler functions with cancellation and progress reporting
-typedef ToolHandler = Future<dynamic> Function(
-    Map<String, dynamic> arguments, ClientSession session);
+typedef ToolHandler = Future<dynamic> Function(Map<String, dynamic> arguments);
 
 /// Type definition for resource handler functions
-typedef ResourceHandler = Future<dynamic> Function(
-    String uri, Map<String, dynamic> params, ClientSession session);
+typedef ResourceHandler = Future<dynamic> Function(String uri, Map<String, dynamic> params);
 
 /// Type definition for prompt handler functions
-typedef PromptHandler = Future<dynamic> Function(
-    Map<String, dynamic> arguments, ClientSession session);
+typedef PromptHandler = Future<dynamic> Function(Map<String, dynamic> arguments);
 
 /// Main MCP Server class that handles all server-side protocol operations
 class Server implements ServerInterface {
@@ -82,8 +79,7 @@ class Server implements ServerInterface {
   final Map<String, PendingOperation> _pendingOperations = {};
 
   // Pending sampling requests tracker
-  final Map<String, Completer<Map<String, dynamic>>> _pendingSamplingRequests =
-      {};
+  final Map<String, Completer<Map<String, dynamic>>> _pendingSamplingRequests = {};
 
   /// Server start time for health metrics
   final DateTime _startTime = DateTime.now();
@@ -97,8 +93,7 @@ class Server implements ServerInterface {
 
   /// Stream controllers for session events
   final _connectStreamController = StreamController<ClientSession>.broadcast();
-  final _disconnectStreamController =
-      StreamController<ClientSession>.broadcast();
+  final _disconnectStreamController = StreamController<ClientSession>.broadcast();
 
   /// Stream of session connection events
   @override
@@ -124,10 +119,8 @@ class Server implements ServerInterface {
       _logger.debug('Server already has a transport connected');
 
       // Handle STDIO transport specifically
-      if (transport is StdioServerTransport &&
-          _transport is StdioServerTransport) {
-        _logger.debug(
-            'Attempting to connect another STDIO transport - reusing existing connection');
+      if (transport is StdioServerTransport && _transport is StdioServerTransport) {
+        _logger.debug('Attempting to connect another STDIO transport - reusing existing connection');
         // Use existing transport instead of the new one
         transport = _transport as StdioServerTransport;
       } else {
@@ -136,13 +129,6 @@ class Server implements ServerInterface {
     }
 
     _transport = transport;
-
-    // If using SSE, set up the callback to update session headers when available
-    if (transport is SseServerTransport) {
-      transport.onSessionCreate = (sessionId, headers) {
-        updateSessionHeaders(sessionId, headers);
-      };
-    }
 
     // Create a new session
     final sessionId = _createSession(transport);
@@ -175,8 +161,7 @@ class Server implements ServerInterface {
         _logger.debug('Stack trace: $stackTrace');
 
         try {
-          _sendErrorResponse(message.sessionId, message.id,
-              ErrorCode.internalError, 'Internal error: $e');
+          _sendErrorResponse(message.sessionId, message.id, ErrorCode.internalError, 'Internal error: $e');
         } catch (sendError) {
           _logger.error('Failed to send error response: $sendError');
         }
@@ -187,15 +172,13 @@ class Server implements ServerInterface {
   }
 
   /// Create a new client session
-  String _createSession(ServerTransport transport,
-      {Map<String, String>? headers}) {
+  String _createSession(ServerTransport transport) {
     final sessionId = Uuid().v4();
 
     final session = ClientSession(
       id: sessionId,
       transport: transport,
       capabilities: {},
-      headers: headers ?? {},
     );
 
     _sessions[sessionId] = session;
@@ -259,7 +242,11 @@ class Server implements ServerInterface {
     final operation = _pendingOperations[operationId];
     if (operation?.requestId != null) {
       sendProgressNotification(
-          operation!.sessionId, operation.requestId!, progress, message);
+          operation!.sessionId,
+          operation.requestId!,
+          progress,
+          message
+      );
     }
   }
 
@@ -270,14 +257,14 @@ class Server implements ServerInterface {
   }
 
   /// Register a tool call and get an operation ID for progress/cancellation
-  String registerToolCall(
-      String toolName, String sessionId, dynamic requestId) {
+  String registerToolCall(String toolName, String sessionId, dynamic requestId) {
     final operationId = Uuid().v4();
     _pendingOperations[operationId] = PendingOperation(
         id: operationId,
         sessionId: sessionId,
         type: 'tool:$toolName',
-        requestId: requestId.toString());
+        requestId: requestId.toString()
+    );
     return operationId;
   }
 
@@ -340,9 +327,7 @@ class Server implements ServerInterface {
     _resourceHandlers[uri] = handler;
 
     // Notify clients about resource changes if connected and supported
-    if (isConnected &&
-        capabilities.resources &&
-        capabilities.resourcesListChanged) {
+    if (isConnected && capabilities.resources && capabilities.resourcesListChanged) {
       _broadcastNotification('resources/listChanged', {});
     }
   }
@@ -369,9 +354,7 @@ class Server implements ServerInterface {
     _promptHandlers[name] = handler;
 
     // Notify clients about prompt changes if connected and supported
-    if (isConnected &&
-        capabilities.prompts &&
-        capabilities.promptsListChanged) {
+    if (isConnected && capabilities.prompts && capabilities.promptsListChanged) {
       _broadcastNotification('prompts/listChanged', {});
     }
   }
@@ -406,9 +389,7 @@ class Server implements ServerInterface {
     _resourceCache.remove(uri);
 
     // Notify clients about resource changes if connected and supported
-    if (isConnected &&
-        capabilities.resources &&
-        capabilities.resourcesListChanged) {
+    if (isConnected && capabilities.resources && capabilities.resourcesListChanged) {
       _broadcastNotification('resources/listChanged', {});
     }
   }
@@ -424,16 +405,13 @@ class Server implements ServerInterface {
     _promptHandlers.remove(name);
 
     // Notify clients about prompt changes if connected and supported
-    if (isConnected &&
-        capabilities.prompts &&
-        capabilities.promptsListChanged) {
+    if (isConnected && capabilities.prompts && capabilities.promptsListChanged) {
       _broadcastNotification('prompts/listChanged', {});
     }
   }
 
   /// Send a logging notification to the client
-  void sendLog(McpLogLevel level, String message,
-      {String? logger, Map<String, dynamic>? data}) {
+  void sendLog(McpLogLevel level, String message, {String? logger, Map<String, dynamic>? data}) {
     if (!isConnected) return;
 
     final params = {
@@ -453,14 +431,12 @@ class Server implements ServerInterface {
   }
 
   /// Send progress notification to the client
-  void sendProgressNotification(
-      String sessionId, String requestId, double progress, String message) {
+  void sendProgressNotification(String sessionId, String requestId, double progress, String message) {
     if (!isConnected) return;
 
     final params = {
       'request_id': requestId,
-      'progress':
-          max(0.0, min(1.0, progress)), // Ensure progress is between 0 and 1
+      'progress': max(0.0, min(1.0, progress)), // Ensure progress is between 0 and 1
       'message': message,
     };
 
@@ -484,8 +460,7 @@ class Server implements ServerInterface {
 
     for (final sessionId in subscribers) {
       if (_sessions.containsKey(sessionId)) {
-        _sendNotification(
-            sessionId, 'notifications/resources/updated', notification);
+        _sendNotification(sessionId, 'notifications/resources/updated', notification);
       }
     }
   }
@@ -495,8 +470,7 @@ class Server implements ServerInterface {
     final session = _sessions[sessionId];
     if (session != null) {
       session.roots = roots;
-      _logger
-          .debug('Stored ${roots.length} client roots for session $sessionId');
+      _logger.debug('Stored ${roots.length} client roots for session $sessionId');
     }
   }
 
@@ -505,9 +479,8 @@ class Server implements ServerInterface {
     final session = _sessions[sessionId];
     if (session == null) return false;
 
-    if (session.roots.isEmpty) {
-      return true; // No roots defined means all paths allowed
-    }
+    if (session.roots.isEmpty) return true; // No roots defined means all paths allowed
+
     for (final root in session.roots) {
       if (path.startsWith(root.uri)) {
         return true;
@@ -533,8 +506,7 @@ class Server implements ServerInterface {
   }
 
   /// Cache a resource
-  void cacheResource(String uri, ReadResourceResult content,
-      [Duration? maxAge]) {
+  void cacheResource(String uri, ReadResourceResult content, [Duration? maxAge]) {
     _resourceCache[uri] = CachedResource(
       uri: uri,
       content: content,
@@ -567,8 +539,8 @@ class Server implements ServerInterface {
       uptime: uptime,
       metrics: {
         'counters': Map<String, int>.from(_metricCounters),
-        'timers': _metricTimers
-            .map((key, timer) => MapEntry(key, timer.elapsed.inMilliseconds)),
+        'timers': _metricTimers.map((key, timer) =>
+            MapEntry(key, timer.elapsed.inMilliseconds)),
       },
     );
   }
@@ -624,15 +596,13 @@ class Server implements ServerInterface {
       _messageController.add(message);
     } catch (e) {
       _logger.error('Parse error: $e');
-      _sendErrorResponse(
-          sessionId, null, ErrorCode.parseError, 'Parse error: $e');
+      _sendErrorResponse(sessionId, null, ErrorCode.parseError, 'Parse error: $e');
     }
   }
 
   /// Process a JSON-RPC message
   Future<void> _processMessage(String sessionId, JsonRpcMessage message) async {
-    final timerName =
-        'message.${message.isRequest ? "request" : "notification"}.${message.method}';
+    final timerName = 'message.${message.isRequest ? "request" : "notification"}.${message.method}';
     startTimer(timerName);
 
     try {
@@ -646,8 +616,7 @@ class Server implements ServerInterface {
         await _handleRequest(sessionId, message);
       } else {
         incrementMetric('messages.invalid');
-        _sendErrorResponse(
-            sessionId, message.id, ErrorCode.invalidRequest, 'Invalid request');
+        _sendErrorResponse(sessionId, message.id, ErrorCode.invalidRequest, 'Invalid request');
       }
 
       incrementMetric('messages.success');
@@ -656,16 +625,19 @@ class Server implements ServerInterface {
       _logger.error('Error processing message: $e');
       _logger.debug('Stacktrace: $stackTrace');
 
-      _sendErrorResponse(sessionId, message.id, ErrorCode.internalError,
-          'Internal server error: ${e.toString()}');
+      _sendErrorResponse(
+          sessionId,
+          message.id,
+          ErrorCode.internalError,
+          'Internal server error: ${e.toString()}'
+      );
     } finally {
       stopTimer(timerName);
     }
   }
 
   /// Handle a JSON-RPC notification
-  Future<void> _handleNotification(
-      String sessionId, JsonRpcMessage notification) async {
+  Future<void> _handleNotification(String sessionId, JsonRpcMessage notification) async {
     _logger.debug('Received notification: ${notification.method}');
 
     // Handle client notifications
@@ -689,10 +661,10 @@ class Server implements ServerInterface {
         if (rootsData != null) {
           final roots = rootsData
               .map((r) => Root(
-                    uri: r['uri'],
-                    name: r['name'],
-                    description: r['description'],
-                  ))
+            uri: r['uri'],
+            name: r['name'],
+            description: r['description'],
+          ))
               .toList();
           _storeClientRoots(sessionId, roots);
         }
@@ -719,21 +691,29 @@ class Server implements ServerInterface {
     // Must be initialized to use other methods
     final session = _sessions[sessionId];
     if (session == null || !session.isInitialized) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidRequest,
-          'Session not initialized yet. Send initialize request first.');
+      _sendErrorResponse(
+          sessionId,
+          request.id,
+          ErrorCode.invalidRequest,
+          'Session not initialized yet. Send initialize request first.'
+      );
       return;
     }
 
     // Route requests based on negotiated protocol version
     final protocolVersion = session.negotiatedProtocolVersion;
     if (protocolVersion == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.incompatibleVersion,
-          'No protocol version negotiated');
+      _sendErrorResponse(
+          sessionId,
+          request.id,
+          ErrorCode.incompatibleVersion,
+          'No protocol version negotiated'
+      );
       return;
     }
 
     switch (request.method) {
-      // Common methods across protocol versions
+    // Common methods across protocol versions
       case 'tools/list':
         await _handleToolsList(sessionId, request);
         break;
@@ -783,14 +763,12 @@ class Server implements ServerInterface {
         break;
 
       default:
-        _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-            'Method not found');
+        _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Method not found');
     }
   }
 
   /// Handle initialize request
-  Future<void> _handleInitialize(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleInitialize(String sessionId, JsonRpcMessage request) async {
     // Handle protocol version negotiation
     final clientVersion = request.params?['protocolVersion'] as String?;
     String negotiatedVersion;
@@ -816,10 +794,8 @@ class Server implements ServerInterface {
         if (compatibleVersions.isNotEmpty) {
           // Sort in descending order and take newest compatible
           compatibleVersions.sort((a, b) => b.compareTo(a));
-          final index = supportedProtocolVersions.indexWhere((v) =>
-              DateTime.tryParse(v)
-                  ?.isAtSameMomentAs(compatibleVersions.first) ??
-              false);
+          final index = supportedProtocolVersions.indexWhere(
+                  (v) => DateTime.tryParse(v)?.isAtSameMomentAs(compatibleVersions.first) ?? false);
           if (index >= 0) {
             negotiatedVersion = supportedProtocolVersions[index];
           } else {
@@ -829,8 +805,12 @@ class Server implements ServerInterface {
           throw FormatException('No compatible version found');
         }
       } catch (e) {
-        _sendErrorResponse(sessionId, request.id, ErrorCode.incompatibleVersion,
-            'Unsupported protocol version: $clientVersion. Supported versions: ${supportedProtocolVersions.join(", ")}');
+        _sendErrorResponse(
+            sessionId,
+            request.id,
+            ErrorCode.incompatibleVersion,
+            'Unsupported protocol version: $clientVersion. Supported versions: ${supportedProtocolVersions.join(", ")}'
+        );
         return;
       }
     }
@@ -851,10 +831,10 @@ class Server implements ServerInterface {
         if (rootsData != null) {
           final roots = rootsData
               .map((r) => Root(
-                    uri: r['uri'],
-                    name: r['name'],
-                    description: r['description'],
-                  ))
+            uri: r['uri'],
+            name: r['name'],
+            description: r['description'],
+          ))
               .toList();
           _storeClientRoots(sessionId, roots);
         }
@@ -864,7 +844,10 @@ class Server implements ServerInterface {
     // Respond with server info and capabilities
     final response = {
       'protocolVersion': negotiatedVersion,
-      'serverInfo': {'name': name, 'version': version},
+      'serverInfo': {
+        'name': name,
+        'version': version
+      },
       'capabilities': capabilities.toJson(),
     };
 
@@ -872,14 +855,12 @@ class Server implements ServerInterface {
   }
 
   /// Handle tools/list request
-  Future<void> _handleToolsList(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleToolsList(String sessionId, JsonRpcMessage request) async {
     _logger.debug('Tools listing requested');
 
     if (!capabilities.tools) {
       _logger.debug('Tools capability not supported');
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Tools capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Tools capability not supported');
       return;
     }
 
@@ -907,38 +888,28 @@ class Server implements ServerInterface {
   /// Handle tools/call request
   Future<void> _handleToolCall(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.tools) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Tools capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Tools capability not supported');
       return;
     }
 
     final toolName = request.params?['name'];
     if (toolName == null || !_tools.containsKey(toolName)) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.toolNotFound,
-          'Tool not found: $toolName');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.toolNotFound, 'Tool not found: $toolName');
       return;
     }
 
     final handler = _toolHandlers[toolName]!;
-    final arguments =
-        Map<String, dynamic>.from(request.params?['arguments'] ?? {});
-    final session = _sessions[sessionId];
-    if (session == null) {
-      _sendErrorResponse(
-          sessionId, request.id, ErrorCode.internalError, 'Session not found');
-      return;
-    }
+    final arguments = request.params?['arguments'] ?? {};
 
     // Register operation
     final operationId = registerToolCall(toolName!, sessionId, request.id);
 
     try {
-      // Call the handler with arguments and session
-      final result = await handler(arguments, session);
+      // Call the handler with just the arguments
+      final result = await handler(arguments);
 
       if (isOperationCancelled(operationId)) {
-        _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled,
-            'Operation cancelled by client');
+        _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled, 'Operation cancelled by client');
       } else {
         _sendResponse(sessionId, request.id, result.toJson());
         _pendingOperations.remove(operationId);
@@ -956,33 +927,27 @@ class Server implements ServerInterface {
   }
 
   /// Handle resources/list request
-  Future<void> _handleResourcesList(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleResourcesList(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.resources) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Resources capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
-    final resourcesList =
-        _resources.values.map((resource) => resource.toJson()).toList();
+    final resourcesList = _resources.values.map((resource) => resource.toJson()).toList();
 
     _sendResponse(sessionId, request.id, {'resources': resourcesList});
   }
 
   /// Handle resources/read request
-  Future<void> _handleResourceRead(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleResourceRead(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.resources) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Resources capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
     final uri = request.params?['uri'];
     if (uri == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
-          'URI parameter is required');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'URI parameter is required');
       return;
     }
 
@@ -999,23 +964,14 @@ class Server implements ServerInterface {
     // Find matching handler
     ResourceHandler? handler;
     for (final entry in _resources.entries) {
-      if (entry.key == uri ||
-          _uriMatches(uri, entry.key, entry.value.uriTemplate)) {
+      if (entry.key == uri || _uriMatches(uri, entry.key, entry.value.uriTemplate)) {
         handler = _resourceHandlers[entry.key];
         break;
       }
     }
 
     if (handler == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.resourceNotFound,
-          'Resource not found: $uri');
-      return;
-    }
-
-    final session = _sessions[sessionId];
-    if (session == null) {
-      _sendErrorResponse(
-          sessionId, request.id, ErrorCode.internalError, 'Session not found');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.resourceNotFound, 'Resource not found: $uri');
       return;
     }
 
@@ -1032,19 +988,21 @@ class Server implements ServerInterface {
       final result = await handler(
         uri,
         request.params ?? {},
-        session,
       );
 
       if (_pendingOperations[operationId]?.isCancelled ?? false) {
-        _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled,
-            'Operation cancelled by client');
+        _sendErrorResponse(
+            sessionId,
+            request.id,
+            ErrorCode.operationCancelled,
+            'Operation cancelled by client'
+        );
       } else {
         // Cache result if cacheable
         final cacheable = request.params?['cacheable'] != false; // default true
         if (cacheable) {
           final maxAge = request.params?['cache_max_age'] as int?;
-          final maxAgeDuration =
-              maxAge != null ? Duration(seconds: maxAge) : null;
+          final maxAgeDuration = maxAge != null ? Duration(seconds: maxAge) : null;
           cacheResource(uri, result, maxAgeDuration);
         }
 
@@ -1065,11 +1023,9 @@ class Server implements ServerInterface {
   }
 
   /// Handle resources/templates/list request
-  Future<void> _handleResourceTemplatesList(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleResourceTemplatesList(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.resources) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Resources capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
@@ -1077,30 +1033,26 @@ class Server implements ServerInterface {
     final resourceTemplates = _resources.values
         .where((resource) => resource.uriTemplate != null)
         .map((resource) => {
-              'uriTemplate': resource.uri,
-              'name': resource.name,
-              'description': resource.description,
-              'mimeType': resource.mimeType,
-            })
+      'uriTemplate': resource.uri,
+      'name': resource.name,
+      'description': resource.description,
+      'mimeType': resource.mimeType,
+    })
         .toList();
 
-    _sendResponse(
-        sessionId, request.id, {'resourceTemplates': resourceTemplates});
+    _sendResponse(sessionId, request.id, {'resourceTemplates': resourceTemplates});
   }
 
   /// Handle resources/subscribe request
-  Future<void> _handleResourceSubscribe(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleResourceSubscribe(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.resources) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Resources capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
     final uri = request.params?['uri'];
     if (uri == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
-          'URI parameter is required');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'URI parameter is required');
       return;
     }
 
@@ -1114,18 +1066,15 @@ class Server implements ServerInterface {
   }
 
   /// Handle resources/unsubscribe request
-  Future<void> _handleResourceUnsubscribe(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleResourceUnsubscribe(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.resources) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Resources capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
     final uri = request.params?['uri'];
     if (uri == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
-          'URI parameter is required');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'URI parameter is required');
       return;
     }
 
@@ -1139,43 +1088,31 @@ class Server implements ServerInterface {
   }
 
   /// Handle prompts/list request
-  Future<void> _handlePromptsList(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handlePromptsList(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.prompts) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Prompts capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Prompts capability not supported');
       return;
     }
 
-    final promptsList =
-        _prompts.values.map((prompt) => prompt.toJson()).toList();
+    final promptsList = _prompts.values.map((prompt) => prompt.toJson()).toList();
     _sendResponse(sessionId, request.id, {'prompts': promptsList});
   }
 
   /// Handle prompts/get request
-  Future<void> _handlePromptGet(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handlePromptGet(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.prompts) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Prompts capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Prompts capability not supported');
       return;
     }
 
     final promptName = request.params?['name'];
     if (promptName == null || !_prompts.containsKey(promptName)) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.promptNotFound,
-          'Prompt not found: $promptName');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.promptNotFound, 'Prompt not found: $promptName');
       return;
     }
 
     final handler = _promptHandlers[promptName]!;
     final arguments = request.params?['arguments'] ?? {};
-    final session = _sessions[sessionId];
-    if (session == null) {
-      _sendErrorResponse(
-          sessionId, request.id, ErrorCode.internalError, 'Session not found');
-      return;
-    }
 
     // Register operation for potential cancellation
     final operationId = Uuid().v4();
@@ -1187,11 +1124,15 @@ class Server implements ServerInterface {
     );
 
     try {
-      final result = await handler(arguments, session);
+      final result = await handler(arguments);
 
       if (_pendingOperations[operationId]?.isCancelled ?? false) {
-        _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled,
-            'Operation cancelled by client');
+        _sendErrorResponse(
+            sessionId,
+            request.id,
+            ErrorCode.operationCancelled,
+            'Operation cancelled by client'
+        );
       } else {
         _sendResponse(sessionId, request.id, result.toJson());
         _pendingOperations.remove(operationId);
@@ -1209,26 +1150,22 @@ class Server implements ServerInterface {
   }
 
   /// Handle cancel operation request
-  Future<void> _handleCancelOperation(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleCancelOperation(String sessionId, JsonRpcMessage request) async {
     final operationId = request.params?['id'];
     if (operationId == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
-          'Operation ID parameter is required');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'Operation ID parameter is required');
       return;
     }
 
     final operation = _pendingOperations[operationId];
     if (operation == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
-          'Operation not found: $operationId');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'Operation not found: $operationId');
       return;
     }
 
     // Check session ownership
     if (operation.sessionId != sessionId) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.unauthorized,
-          'Unauthorized to cancel this operation');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.unauthorized, 'Unauthorized to cancel this operation');
       return;
     }
 
@@ -1237,34 +1174,29 @@ class Server implements ServerInterface {
   }
 
   /// Handle health check request
-  Future<void> _handleHealthCheck(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleHealthCheck(String sessionId, JsonRpcMessage request) async {
     final health = getHealth();
     _sendResponse(sessionId, request.id, health.toJson());
   }
 
   /// Handle sampling/createMessage request
-  Future<void> _handleSamplingCreateMessage(
-      String sessionId, JsonRpcMessage request) async {
+  Future<void> _handleSamplingCreateMessage(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.sampling) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Sampling capability not supported');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Sampling capability not supported');
       return;
     }
 
     // Check client capabilities
     final session = _sessions[sessionId];
     if (session == null) {
-      _sendErrorResponse(
-          sessionId, request.id, ErrorCode.internalError, 'Session not found');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.internalError, 'Session not found');
       return;
     }
 
     final clientCapabilities = session.capabilities;
     final clientHasSampling = (clientCapabilities['sampling'] != null);
     if (!clientHasSampling) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
-          'Client does not support sampling capability');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Client does not support sampling capability');
       return;
     }
 
@@ -1279,27 +1211,30 @@ class Server implements ServerInterface {
       _pendingSamplingRequests[samplingRequestId] = completer;
 
       // Forward request to client
-      _sendNotification(sessionId, 'sampling/createMessage',
-          {'request_id': samplingRequestId, 'params': request.params});
+      _sendNotification(sessionId, 'sampling/createMessage', {
+        'request_id': samplingRequestId,
+        'params': request.params
+      });
 
       // Wait for response (with timeout)
-      final responseData =
-          await completer.future.timeout(Duration(seconds: 60), onTimeout: () {
-        _pendingSamplingRequests.remove(samplingRequestId);
-        throw TimeoutException('Sampling request timed out');
-      });
+      final responseData = await completer.future.timeout(
+          Duration(seconds: 60),
+          onTimeout: () {
+            _pendingSamplingRequests.remove(samplingRequestId);
+            throw TimeoutException('Sampling request timed out');
+          }
+      );
 
       // Send response back to the original requester
       _sendResponse(sessionId, request.id, responseData);
+
     } catch (e) {
-      _sendErrorResponse(
-          sessionId, request.id, ErrorCode.internalError, 'Sampling error: $e');
+      _sendErrorResponse(sessionId, request.id, ErrorCode.internalError, 'Sampling error: $e');
     }
   }
 
 // Handler for sampling responses from clients
-  Future<void> _handleSamplingResponse(
-      String sessionId, JsonRpcMessage notification) async {
+  Future<void> _handleSamplingResponse(String sessionId, JsonRpcMessage notification) async {
     final requestId = notification.params?['request_id'];
     if (requestId == null) {
       _logger.error('Received sampling response without request_id');
@@ -1308,8 +1243,7 @@ class Server implements ServerInterface {
 
     final completer = _pendingSamplingRequests[requestId];
     if (completer == null) {
-      _logger
-          .error('Received sampling response for unknown request: $requestId');
+      _logger.error('Received sampling response for unknown request: $requestId');
       return;
     }
 
@@ -1357,8 +1291,7 @@ class Server implements ServerInterface {
   void _sendResponse(String sessionId, dynamic id, dynamic result) {
     final session = _sessions[sessionId];
     if (session == null) {
-      _logger.error(
-          'Attempted to send response to non-existent session: $sessionId');
+      _logger.error('Attempted to send response to non-existent session: $sessionId');
       return;
     }
 
@@ -1372,13 +1305,10 @@ class Server implements ServerInterface {
   }
 
   /// Send a JSON-RPC error response to specific session
-  void _sendErrorResponse(
-      String sessionId, dynamic id, int code, String message,
-      [Map<String, dynamic>? data]) {
+  void _sendErrorResponse(String sessionId, dynamic id, int code, String message, [Map<String, dynamic>? data]) {
     final session = _sessions[sessionId];
     if (session == null) {
-      _logger
-          .error('Attempted to send error to non-existent session: $sessionId');
+      _logger.error('Attempted to send error to non-existent session: $sessionId');
       return;
     }
 
@@ -1410,12 +1340,10 @@ class Server implements ServerInterface {
   }
 
   /// Send a JSON-RPC notification to specific session
-  void _sendNotification(
-      String sessionId, String method, Map<String, dynamic> params) {
+  void _sendNotification(String sessionId, String method, Map<String, dynamic> params) {
     final session = _sessions[sessionId];
     if (session == null) {
-      _logger.error(
-          'Attempted to send notification to non-existent session: $sessionId');
+      _logger.error('Attempted to send notification to non-existent session: $sessionId');
       return;
     }
 
@@ -1456,18 +1384,6 @@ class Server implements ServerInterface {
   /// Get all active sessions
   @override
   List<ClientSession> getSessions() => _sessions.values.toList();
-
-  /// Update headers for an existing session
-  void updateSessionHeaders(String sessionId, Map<String, String> headers) {
-    final session = _sessions[sessionId];
-    if (session != null) {
-      session.headers = headers;
-      _logger.debug('Updated headers for session: $sessionId');
-    } else {
-      _logger.warning(
-          'Tried to update headers for non-existent session: $sessionId');
-    }
-  }
 }
 
 /// Server capabilities configuration
@@ -1566,13 +1482,9 @@ class JsonRpcMessage {
       jsonrpc: json['jsonrpc'],
       id: json['id'],
       method: json['method'],
-      params: json['params'] != null
-          ? Map<String, dynamic>.from(json['params'])
-          : null,
+      params: json['params'] != null ? Map<String, dynamic>.from(json['params']) : null,
       result: json['result'],
-      error: json['error'] != null
-          ? Map<String, dynamic>.from(json['error'])
-          : null,
+      error: json['error'] != null ? Map<String, dynamic>.from(json['error']) : null,
     );
   }
 }
