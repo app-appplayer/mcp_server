@@ -137,6 +137,13 @@ class Server implements ServerInterface {
 
     _transport = transport;
 
+    // If using SSE, set up the callback to update session headers when available
+    if (transport is SseServerTransport) {
+      transport.onSessionCreate = (sessionId, headers) {
+        updateSessionHeaders(sessionId, headers);
+      };
+    }
+
     // Create a new session
     final sessionId = _createSession(transport);
 
@@ -1449,6 +1456,18 @@ class Server implements ServerInterface {
   /// Get all active sessions
   @override
   List<ClientSession> getSessions() => _sessions.values.toList();
+
+  /// Update headers for an existing session
+  void updateSessionHeaders(String sessionId, Map<String, String> headers) {
+    final session = _sessions[sessionId];
+    if (session != null) {
+      session.headers = headers;
+      _logger.debug('Updated headers for session: $sessionId');
+    } else {
+      _logger.warning(
+          'Tried to update headers for non-existent session: $sessionId');
+    }
+  }
 }
 
 /// Server capabilities configuration

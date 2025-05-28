@@ -279,7 +279,7 @@ class SseServerTransport implements ServerTransport {
     request.headers.forEach((name, values) {
       headers[name] = values.join(', ');
     });
-
+    
     // Notify server of new session and headers
     if (onSessionCreate != null) {
       onSessionCreate!(sessionId, headers);
