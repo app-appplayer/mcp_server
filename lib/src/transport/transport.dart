@@ -337,6 +337,16 @@ class SseServerTransport implements ServerTransport {
       return;
     }
 
+    if (onSseRequestValidator != null) {
+      final shouldContinue = onSseRequestValidator!(request);
+      if (!shouldContinue) {
+        _logger.debug(
+          '[SSE] Connection rejected by onSseRequestValidator callback',
+        );
+        return;
+      }
+    }
+
     final sessionId = request.uri.queryParameters['sessionId'];
 
     if (sessionId == null || !_sessionClients.containsKey(sessionId)) {
