@@ -63,35 +63,35 @@ class StdioServerTransport implements ServerTransport {
           .transform(const LineSplitter())
           .where((line) => line.isNotEmpty)
           .map((line) {
-        try {
-          _logger.debug('Raw received line: $line');
-          final parsedMessage = jsonDecode(line);
-          _logger.debug('Parsed message: $parsedMessage');
-          return parsedMessage;
-        } catch (e) {
-          _logger.debug('JSON parsing error: $e');
-          _logger.debug('Problematic line: $line');
-          return null;
-        }
-      })
+            try {
+              _logger.debug('Raw received line: $line');
+              final parsedMessage = jsonDecode(line);
+              _logger.debug('Parsed message: $parsedMessage');
+              return parsedMessage;
+            } catch (e) {
+              _logger.debug('JSON parsing error: $e');
+              _logger.debug('Problematic line: $line');
+              return null;
+            }
+          })
           .where((message) => message != null)
           .listen(
             (message) {
-          _logger.debug('Processing message: $message');
-          if (!_messageController.isClosed) {
-            _messageController.add(message);
-          }
-        },
-        onError: (error) {
-          _logger.debug('Stream error: $error');
-          _handleTransportError(error);
-        },
-        onDone: () {
-          _logger.debug('stdin stream done');
-          _handleStreamClosure();
-        },
-        cancelOnError: false,
-      );
+              _logger.debug('Processing message: $message');
+              if (!_messageController.isClosed) {
+                _messageController.add(message);
+              }
+            },
+            onError: (error) {
+              _logger.debug('Stream error: $error');
+              _handleTransportError(error);
+            },
+            onDone: () {
+              _logger.debug('stdin stream done');
+              _handleStreamClosure();
+            },
+            cancelOnError: false,
+          );
     } catch (e) {
       _logger.debug('Error initializing STDIO transport: $e');
       _handleTransportError(e);
@@ -186,6 +186,7 @@ class SseServerTransport implements ServerTransport {
   final int port;
   final List<int>? fallbackPorts;
   final String? authToken;
+  final Future<bool> Function(HttpRequest)? onSseRequestValidator;
 
   final _messageController = StreamController<dynamic>.broadcast();
   final _closeCompleter = Completer<void>();
@@ -199,6 +200,7 @@ class SseServerTransport implements ServerTransport {
     required this.port,
     this.fallbackPorts,
     this.authToken,
+    this.onSseRequestValidator,
   }) {
     _initialize();
   }
@@ -217,7 +219,9 @@ class SseServerTransport implements ServerTransport {
             _logger.debug('Server listening on fallback port $fallbackPort');
             break;
           } catch (e) {
-            _logger.debug('Failed to start server on fallback port $fallbackPort: $e');
+            _logger.debug(
+              'Failed to start server on fallback port $fallbackPort: $e',
+            );
           }
         }
       }
@@ -254,6 +258,16 @@ class SseServerTransport implements ServerTransport {
       return;
     }
 
+    if (onSseRequestValidator != null) {
+      final shouldContinue = await onSseRequestValidator!(request);
+      if (!shouldContinue) {
+        _logger.debug(
+          '[SSE] Connection rejected by onSseRequestValidator callback',
+        );
+        return;
+      }
+    }
+
     if (authToken != null) {
       final authHeader = request.headers.value('Authorization');
       if (authHeader == null || authHeader != 'Bearer $authToken') {
@@ -286,30 +300,37 @@ class SseServerTransport implements ServerTransport {
 
     _sessionClients[sessionId] = request.response;
 
-    request.response.done.then((_) {
-      _logger.debug('[SSE] Client disconnected: $sessionId');
-      _sessionClients.remove(sessionId);
+    request.response.done
+        .then((_) {
+          _logger.debug('[SSE] Client disconnected: $sessionId');
+          _sessionClients.remove(sessionId);
 
-      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
-        _logger.info('[SSE] All clients disconnected, completing onClose');
-        _closeCompleter.complete();
-      }
-    }).catchError((e) {
-      _logger.debug('[SSE] Client error: $sessionId - $e');
-      _sessionClients.remove(sessionId);
+          if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+            _logger.info('[SSE] All clients disconnected, completing onClose');
+            _closeCompleter.complete();
+          }
+        })
+        .catchError((e) {
+          _logger.debug('[SSE] Client error: $sessionId - $e');
+          _sessionClients.remove(sessionId);
 
-      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
-        _logger.info('[SSE] All clients disconnected (after error), completing onClose');
-        _closeCompleter.complete();
-      }
-    });
+          if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+            _logger.info(
+              '[SSE] All clients disconnected (after error), completing onClose',
+            );
+            _closeCompleter.complete();
+          }
+        });
   }
 
   void _setCorsHeaders(HttpResponse response) {
     response.headers
       ..add('Access-Control-Allow-Origin', '*')
       ..add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      ..add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+      ..add(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, accept, cache-control',
+      )
       ..add('Access-Control-Max-Age', '86400');
   }
 
@@ -322,6 +343,16 @@ class SseServerTransport implements ServerTransport {
       return;
     }
 
+    if (onSseRequestValidator != null) {
+      final shouldContinue = await onSseRequestValidator!(request);
+      if (!shouldContinue) {
+        _logger.debug(
+          '[SSE] Connection rejected by onSseRequestValidator callback',
+        );
+        return;
+      }
+    }
+
     final sessionId = request.uri.queryParameters['sessionId'];
 
     if (sessionId == null || !_sessionClients.containsKey(sessionId)) {
@@ -331,7 +362,9 @@ class SseServerTransport implements ServerTransport {
         ..headers.add('Content-Type', 'application/json')
         ..write(jsonEncode({'error': 'Unauthorized or Invalid session'}));
       await request.response.close();
-      _logger.debug('[SSE] Unauthorized message attempt with invalid sessionId: $sessionId');
+      _logger.debug(
+        '[SSE] Unauthorized message attempt with invalid sessionId: $sessionId',
+      );
       return;
     }
 
@@ -348,8 +381,13 @@ class SseServerTransport implements ServerTransport {
       final message = jsonDecode(body);
 
       if (message is Map && message['jsonrpc'] == '2.0') {
-        _messageController.add(message);
+        Map<String, dynamic> headers = {};
+        request.headers.forEach((key, value) {
+          headers[key] = value;
+        });
 
+        message['headers'] = headers;
+        _messageController.add(message);
         _setCorsHeaders(request.response);
         request.response
           ..statusCode = HttpStatus.ok
