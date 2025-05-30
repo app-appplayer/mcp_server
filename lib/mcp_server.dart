@@ -37,7 +37,7 @@ class McpServer {
     int port = 8080,
     List<int>? fallbackPorts,
     String? authToken,
-    bool Function(HttpRequest)? onSseRequestValidator,
+    Future<bool> Function(HttpRequest)? onSseRequestValidator,
   }) {
     return SseServerTransport(
       endpoint: endpoint,
