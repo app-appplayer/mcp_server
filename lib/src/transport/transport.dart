@@ -3,8 +3,13 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../../logger.dart';
+import '../middleware/compression.dart';
 
-final Logger _logger = Logger.getLogger('mcp_server.transport');
+export 'websocket_transport.dart';
+export 'connection_manager.dart';
+export 'http_server_transport.dart';
+
+final Logger _logger = Logger('mcp_server.transport');
 
 /// Abstract base class for server transport implementations
 abstract class ServerTransport {
@@ -183,23 +188,30 @@ class StdioServerTransport implements ServerTransport {
 class SseServerTransport implements ServerTransport {
   final String endpoint;
   final String messagesEndpoint;
+  final String host;
   final int port;
   final List<int>? fallbackPorts;
   final String? authToken;
+  final CompressionConfig? compressionConfig;
 
   final _messageController = StreamController<dynamic>.broadcast();
   final _closeCompleter = Completer<void>();
 
   HttpServer? _server;
   final _sessionClients = <String, HttpResponse>{};
+  final _sessionCompression = <String, CompressionType>{};
+  late final CompressionMiddleware _compression;
 
   SseServerTransport({
     required this.endpoint,
     required this.messagesEndpoint,
+    required this.host,
     required this.port,
     this.fallbackPorts,
     this.authToken,
+    this.compressionConfig,
   }) {
+    _compression = CompressionMiddleware(config: compressionConfig);
     _initialize();
   }
 
@@ -229,7 +241,18 @@ class SseServerTransport implements ServerTransport {
   }
 
   Future<HttpServer> _startServer(int port) async {
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    // Parse host and bind accordingly
+    final address = host == 'localhost' || host == '127.0.0.1' 
+        ? InternetAddress.loopbackIPv4
+        : host == '::1'
+        ? InternetAddress.loopbackIPv6
+        : host == '0.0.0.0'
+        ? InternetAddress.anyIPv4
+        : host == '::'
+        ? InternetAddress.anyIPv6
+        : InternetAddress.tryParse(host) ?? InternetAddress.loopbackIPv4;
+    
+    final server = await HttpServer.bind(address, port);
 
     server.listen((HttpRequest request) {
       if (request.uri.path == endpoint) {
@@ -270,25 +293,39 @@ class SseServerTransport implements ServerTransport {
 
     final sessionId = DateTime.now().millisecondsSinceEpoch.toString();
     _setCorsHeaders(request.response);
+    
+    // Check for compression support
+    final acceptEncoding = request.headers.value('Accept-Encoding');
+    final compressionType = _compression.selectCompressionType(acceptEncoding);
+    _sessionCompression[sessionId] = compressionType;
+    
+    // Set MCP standard SSE headers (no compression for SSE compatibility)
     request.response.headers
-      ..add('Content-Type', 'text/event-stream')
-      ..add('Cache-Control', 'no-cache')
-      ..add('Connection', 'keep-alive')
+      ..set('Content-Type', 'text/event-stream; charset=utf-8')
+      ..set('Cache-Control', 'no-cache, no-store')
+      ..set('Connection', 'keep-alive')
+      ..set('X-Accel-Buffering', 'no')  // Nginx compatibility
       ..add('X-Session-Id', sessionId);
+    
+    // Force no compression for SSE to ensure Python MCP SDK compatibility
+    _sessionCompression[sessionId] = CompressionType.none;
 
     request.response.bufferOutput = false;
 
+    // Send endpoint information in MCP standard format
+    final serverPort = _server?.port ?? port;
+    final endpointUrl = 'http://localhost:$serverPort$messagesEndpoint?sessionId=$sessionId';
     request.response.write('event: endpoint\n');
-    final endpointUrl = '/message?sessionId=$sessionId';
     request.response.write('data: $endpointUrl\n\n');
     await request.response.flush();
-    _logger.debug('[SSE] Sent connection_established message: $sessionId');
+    _logger.debug('[SSE] Sent MCP standard endpoint message: $endpointUrl for session: $sessionId');
 
     _sessionClients[sessionId] = request.response;
 
     request.response.done.then((_) {
       _logger.debug('[SSE] Client disconnected: $sessionId');
       _sessionClients.remove(sessionId);
+      _sessionCompression.remove(sessionId);
 
       if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
         _logger.info('[SSE] All clients disconnected, completing onClose');
@@ -297,6 +334,7 @@ class SseServerTransport implements ServerTransport {
     }).catchError((e) {
       _logger.debug('[SSE] Client error: $sessionId - $e');
       _sessionClients.remove(sessionId);
+      _sessionCompression.remove(sessionId);
 
       if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
         _logger.info('[SSE] All clients disconnected (after error), completing onClose');
@@ -384,7 +422,8 @@ class SseServerTransport implements ServerTransport {
     final toRemove = <String>[];
 
     _sessionClients.forEach((sessionId, client) {
-      final success = _sendToClient(client, eventData);
+      final compressionType = _sessionCompression[sessionId] ?? CompressionType.none;
+      final success = _sendToClient(client, eventData, compressionType);
       if (!success) {
         _logger.debug('[SSE] Removing disconnected client: $sessionId');
         toRemove.add(sessionId);
@@ -393,12 +432,26 @@ class SseServerTransport implements ServerTransport {
 
     for (final id in toRemove) {
       _sessionClients.remove(id);
+      _sessionCompression.remove(id);
     }
   }
 
   /// Safely sends data to a client, returns false if an error occurred
-  bool _sendToClient(HttpResponse client, String data) {
+  bool _sendToClient(HttpResponse client, String data, CompressionType compressionType) {
     try {
+      if (compressionType != CompressionType.none) {
+        // Compress the data
+        final bytes = utf8.encode(data);
+        final compressed = _compression.compress(bytes, 'text/event-stream');
+        
+        if (compressed != null && compressed.worthCompressing) {
+          client.add(compressed.data);
+          client.flush();
+          return true;
+        }
+      }
+      
+      // Send uncompressed
       client.write(data);
       client.flush();
       return true;

@@ -1,3 +1,84 @@
+## 1.0.0 - 2025-03-26
+
+### 🎉 Major Release - MCP Protocol v2025-03-26
+
+#### Added
+- **MCP Protocol v2025-03-26 Support**
+  - Full compliance with latest MCP specification
+  - Enhanced JSON-RPC 2.0 implementation
+  - Backward compatibility with 2024-11-05
+  - Protocol version negotiation
+
+- **Modern Dart Patterns**
+  - Result<T, E> pattern for error handling
+  - Sealed classes for type safety
+  - Pattern matching with switch expressions
+  - Immutable data structures with @immutable
+
+- **Enhanced Tool System**
+  - Tool annotations for metadata and capabilities
+  - ToolAnnotationUtils builder for easy configuration
+  - Support for progress tracking and cancellation
+  - Tool categories and priorities
+  - Estimated duration and examples
+
+- **OAuth 2.1 Authentication**
+  - Built-in OAuth middleware support
+  - Token validation and refresh
+  - Scope-based authorization
+  - Session management integration
+
+- **Streamable HTTP Transport**
+  - HTTP/2 support for better performance
+  - Concurrent request handling
+  - Keep-alive connections
+  - Enhanced CORS configuration
+
+- **Advanced Configuration System**
+  - McpServerConfig for type-safe setup
+  - Production-ready defaults
+  - Environment-based configuration
+  - Feature flags support
+
+- **Connection State Management**
+  - Real-time connection monitoring
+  - Automatic client recovery
+  - Health check endpoints
+  - Circuit breaker patterns
+
+- **Standard Logging Integration**
+  - package:logging based system
+  - Colored terminal output
+  - Structured log formatting
+  - Performance metrics tracking
+
+#### Changed
+- **Breaking Changes**
+  - Upgraded minimum Dart SDK to ^3.8.0
+  - New factory-based server creation
+  - Enhanced configuration patterns
+  - Improved type safety throughout
+
+- **API Improvements**
+  - Simplified server creation with McpServer.createAndStart()
+  - Better transport configuration
+  - More intuitive error handling
+  - Enhanced capability declarations
+
+#### Protocol Compliance
+- ✅ JSON-RPC 2.0 specification
+- ✅ MCP Core Protocol v2025-03-26
+- ✅ Bidirectional communication
+- ✅ Tool execution with progress
+- ✅ Resource management with templates
+- ✅ Prompt handling with metadata
+- ✅ Sampling (LLM text generation)
+- ✅ Logging integration
+- ✅ Root management
+- ✅ Progress notifications
+- ✅ Cancellation support
+- ✅ Batch operations
+
 ## 0.2.0
 ## 0.1.9
 

@@ -1,4 +1,5 @@
-import '../../mcp_server.dart';
+import 'package:meta/meta.dart';
+import '../auth/auth_middleware.dart';
 
 /// Base content type enum for MCP
 enum MessageRole {
@@ -25,112 +26,192 @@ enum McpLogLevel {
   emergency // 7
 }
 
-/// Base class for all MCP content types
+/// Base class for all MCP content types (2025-03-26 compliant)
+@immutable
 abstract class Content {
-  final MCPContentType type;
-
-  Content(this.type);
+  const Content();
 
   Map<String, dynamic> toJson();
-}
-
-/// Text content representation
-class TextContent extends Content {
-  final String text;
-
-  TextContent({required this.text}) : super(MCPContentType.text);
-
-  @override
-  Map<String, dynamic> toJson() {
-    return {
-      'type': 'text',
-      'text': text,
+  
+  factory Content.fromJson(Map<String, dynamic> json) {
+    final type = json['type'] as String;
+    return switch (type) {
+      'text' => TextContent.fromJson(json),
+      'image' => ImageContent.fromJson(json),
+      'resource' => ResourceContent.fromJson(json),
+      _ => throw ArgumentError('Unknown content type: $type'),
     };
   }
 }
 
-/// Image content representation
-class ImageContent extends Content {
-  final String url;
-  final String? base64Data;
-  final String mimeType;
+/// Text content representation
+@immutable
+class TextContent extends Content {
+  final String text;
+  final Map<String, dynamic>? annotations;
 
-  ImageContent({
-    required this.url,
-    this.base64Data,
+  const TextContent({
+    required this.text,
+    this.annotations,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'type': 'text',
+      'text': text,
+    };
+    if (annotations != null) json['annotations'] = annotations!;
+    return json;
+  }
+  
+  factory TextContent.fromJson(Map<String, dynamic> json) {
+    return TextContent(
+      text: json['text'] as String,
+      annotations: json['annotations'] as Map<String, dynamic>?,
+    );
+  }
+}
+
+/// Image content representation
+@immutable
+class ImageContent extends Content {
+  final String? url;
+  final String? data; // Base64 encoded image for 2025 spec
+  final String mimeType;
+  final Map<String, dynamic>? annotations;
+
+  const ImageContent({
+    this.url,
+    this.data,
     required this.mimeType,
-  }) : super(MCPContentType.image);
+    this.annotations,
+  }) : assert(url != null || data != null, 'Either url or data must be provided');
 
   factory ImageContent.fromBase64({
     required String base64Data,
     required String mimeType,
   }) {
     return ImageContent(
-      url: 'data:$mimeType;base64,$base64Data',
-      base64Data: base64Data,
+      data: base64Data,
       mimeType: mimeType,
     );
   }
 
   @override
   Map<String, dynamic> toJson() {
-    return {
+    final json = <String, dynamic>{
       'type': 'image',
-      'url': url,
       'mimeType': mimeType,
     };
+    
+    // 2025 spec uses 'data' for base64, but maintain 'url' for compatibility
+    if (data != null) {
+      json['data'] = data!;
+    } else if (url != null) {
+      json['url'] = url!;
+    }
+    
+    if (annotations != null) json['annotations'] = annotations!;
+    return json;
+  }
+  
+  factory ImageContent.fromJson(Map<String, dynamic> json) {
+    return ImageContent(
+      url: json['url'] as String?,
+      data: json['data'] as String?,
+      mimeType: json['mimeType'] as String,
+      annotations: json['annotations'] as Map<String, dynamic>?,
+    );
   }
 }
 
 /// Resource content representation
+@immutable
 class ResourceContent extends Content {
   final String uri;
   final String? text;
   final String? blob;
+  final String? mimeType;
+  final Map<String, dynamic>? annotations;
 
-  ResourceContent({
+  const ResourceContent({
     required this.uri,
     this.text,
     this.blob,
-  }) : super(MCPContentType.resource);
+    this.mimeType,
+    this.annotations,
+  });
 
   @override
   Map<String, dynamic> toJson() {
-    final json = {
-      'type': 'resource',
+    final resource = <String, dynamic>{
       'uri': uri,
     };
-
-    if (text != null) {
-      json['text'] = text!;
-    }
-
-    if (blob != null) {
-      json['blob'] = blob!;
-    }
-
+    if (text != null) resource['text'] = text!;
+    if (blob != null) resource['blob'] = blob!;
+    if (mimeType != null) resource['mimeType'] = mimeType!;
+    
+    final json = <String, dynamic>{
+      'type': 'resource',
+      'resource': resource,
+    };
+    if (annotations != null) json['annotations'] = annotations!;
     return json;
+  }
+  
+  factory ResourceContent.fromJson(Map<String, dynamic> json) {
+    final resource = json['resource'] as Map<String, dynamic>;
+    return ResourceContent(
+      uri: resource['uri'] as String,
+      text: resource['text'] as String?,
+      blob: resource['blob'] as String?,
+      mimeType: resource['mimeType'] as String?,
+      annotations: json['annotations'] as Map<String, dynamic>?,
+    );
   }
 }
 
-/// Tool definition
+/// Tool definition (2025-03-26 compliant)
+@immutable
 class Tool {
   final String name;
   final String description;
   final Map<String, dynamic> inputSchema;
+  final bool? supportsProgress;
+  final bool? supportsCancellation;
+  final Map<String, dynamic>? metadata;
 
-  Tool({
+  const Tool({
     required this.name,
     required this.description,
     required this.inputSchema,
+    this.supportsProgress,
+    this.supportsCancellation,
+    this.metadata,
   });
 
   Map<String, dynamic> toJson() {
-    return {
+    final json = <String, dynamic>{
       'name': name,
       'description': description,
       'inputSchema': inputSchema,
     };
+    if (supportsProgress == true) json['supportsProgress'] = supportsProgress;
+    if (supportsCancellation == true) json['supportsCancellation'] = supportsCancellation;
+    if (metadata != null) json['metadata'] = metadata!;
+    return json;
+  }
+  
+  factory Tool.fromJson(Map<String, dynamic> json) {
+    return Tool(
+      name: json['name'] as String,
+      description: json['description'] as String,
+      inputSchema: json['inputSchema'] as Map<String, dynamic>,
+      supportsProgress: json['supportsProgress'] as bool?,
+      supportsCancellation: json['supportsCancellation'] as bool?,
+      metadata: json['metadata'] as Map<String, dynamic>?,
+    );
   }
 }
 
@@ -140,11 +221,11 @@ class CallToolResult {
   final bool isStreaming;
   final bool? isError;
 
-  CallToolResult(
-      this.content, {
-        this.isStreaming = false,
-        this.isError,
-      });
+  const CallToolResult({
+    required this.content,
+    this.isStreaming = false,
+    this.isError,
+  });
 
   Map<String, dynamic> toJson() {
     return {
@@ -152,6 +233,42 @@ class CallToolResult {
       'isStreaming': isStreaming,
       if (isError != null) 'isError': isError,
     };
+  }
+}
+
+/// Resource template definition
+class ResourceTemplate {
+  final String uriTemplate;
+  final String name;
+  final String description;
+  final String? mimeType;
+
+  const ResourceTemplate({
+    required this.uriTemplate,
+    required this.name,
+    required this.description,
+    this.mimeType,
+  });
+
+  Map<String, dynamic> toJson() {
+    final result = <String, dynamic>{
+      'uriTemplate': uriTemplate,
+      'name': name,
+      'description': description,
+    };
+    if (mimeType != null) {
+      result['mimeType'] = mimeType;
+    }
+    return result;
+  }
+
+  factory ResourceTemplate.fromJson(Map<String, dynamic> json) {
+    return ResourceTemplate(
+      uriTemplate: json['uriTemplate'] as String,
+      name: json['name'] as String,
+      description: json['description'] as String,
+      mimeType: json['mimeType'] as String?,
+    );
   }
 }
 
@@ -187,24 +304,59 @@ class Resource {
   }
 }
 
+/// Resource content info (used in ReadResourceResult)
+class ResourceContentInfo {
+  final String uri;
+  final String? mimeType;
+  final String? text;
+  final String? blob;
+  
+  ResourceContentInfo({
+    required this.uri,
+    this.mimeType,
+    this.text,
+    this.blob,
+  });
+  
+  Map<String, dynamic> toJson() {
+    final result = <String, dynamic>{'uri': uri};
+    if (mimeType != null) result['mimeType'] = mimeType;
+    if (text != null) result['text'] = text;
+    if (blob != null) result['blob'] = blob;
+    return result;
+  }
+  
+  factory ResourceContentInfo.fromJson(Map<String, dynamic> json) {
+    return ResourceContentInfo(
+      uri: json['uri'] as String,
+      mimeType: json['mimeType'] as String?,
+      text: json['text'] as String?,
+      blob: json['blob'] as String?,
+    );
+  }
+}
+
 /// Resource read result
 class ReadResourceResult {
-  final String content;
-  final String mimeType;
-  final List<Content> contents;
+  final List<ResourceContentInfo> contents;
 
   ReadResourceResult({
-    required this.content,
-    required this.mimeType,
     required this.contents,
   });
 
   Map<String, dynamic> toJson() {
     return {
-      'content': content,
-      'mimeType': mimeType,
       'contents': contents.map((c) => c.toJson()).toList(),
     };
+  }
+  
+  factory ReadResourceResult.fromJson(Map<String, dynamic> json) {
+    final List<dynamic> contentsList = json['contents'] as List<dynamic>? ?? [];
+    final contents = contentsList
+        .map((content) => ResourceContentInfo.fromJson(content as Map<String, dynamic>))
+        .toList();
+
+    return ReadResourceResult(contents: contents);
   }
 }
 
@@ -501,6 +653,8 @@ class Root {
 
 /// Server health information
 class ServerHealth {
+  final String status;
+  final String? version;
   final bool isRunning;
   final int connectedSessions;
   final int registeredTools;
@@ -509,8 +663,11 @@ class ServerHealth {
   final DateTime startTime;
   final Duration uptime;
   final Map<String, dynamic> metrics;
+  final Map<String, dynamic>? capabilities;
 
   ServerHealth({
+    this.status = 'healthy',
+    this.version,
     required this.isRunning,
     required this.connectedSessions,
     required this.registeredTools,
@@ -519,10 +676,13 @@ class ServerHealth {
     required this.startTime,
     required this.uptime,
     required this.metrics,
+    this.capabilities,
   });
 
   Map<String, dynamic> toJson() {
     return {
+      'status': status,
+      if (version != null) 'version': version,
       'isRunning': isRunning,
       'connectedSessions': connectedSessions,
       'registeredTools': registeredTools,
@@ -531,6 +691,7 @@ class ServerHealth {
       'startTime': startTime.toIso8601String(),
       'uptimeSeconds': uptime.inSeconds,
       'metrics': metrics,
+      if (capabilities != null) 'capabilities': capabilities,
     };
   }
 }
@@ -599,32 +760,174 @@ class ErrorCode {
   static const int incompatibleVersion = -32103;
   static const int unauthorized = -32104;
   static const int operationCancelled = -32105;
+  static const int rateLimited = -32106;
 }
 
 /// Client session information
 class ClientSession {
   final String id;
-  final ServerTransport transport;
-  Map<String, dynamic> capabilities;
   final DateTime connectedAt;
-  String? negotiatedProtocolVersion;
+  final Map<String, dynamic> metadata;
+  
+  // MCP 2025-03-26 required properties
   bool isInitialized = false;
-  List<Root> roots = [];
+  String? negotiatedProtocolVersion;
+  Map<String, dynamic>? capabilities;
+  dynamic transport; // ServerTransport
+  List<Map<String, dynamic>> roots = [];
+  
+  // OAuth 2.1 authentication support (2025-03-26)
+  String? authToken;
+  Map<String, Map<String, dynamic>>? pendingAuthCodes;
+  Map<String, Map<String, dynamic>>? accessTokens;
+  AuthContext? authContext;
 
   ClientSession({
     required this.id,
-    required this.transport,
-    required this.capabilities,
-  }) : connectedAt = DateTime.now();
+    required this.connectedAt,
+    this.metadata = const {},
+    this.transport,
+  });
 
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'connectedAt': connectedAt.toIso8601String(),
-      'protocolVersion': negotiatedProtocolVersion,
-      'initialized': isInitialized,
+      'metadata': metadata,
+      'isInitialized': isInitialized,
+      'negotiatedProtocolVersion': negotiatedProtocolVersion,
       'capabilities': capabilities,
-      'roots': roots.map((r) => r.toJson()).toList(),
+      'roots': roots,
     };
   }
+}
+
+/// Progress notification data (2025-03-26)
+@immutable
+class ProgressNotification {
+  final String progressToken;
+  final double progress;
+  final double? total;
+
+  const ProgressNotification({
+    required this.progressToken,
+    required this.progress,
+    this.total,
+  });
+
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'progressToken': progressToken,
+      'progress': progress,
+    };
+    if (total != null) json['total'] = total!;
+    return json;
+  }
+}
+
+/// Prompt message (2025-03-26)
+@immutable
+class PromptMessage {
+  final PromptMessageRole role;
+  final Content content;
+
+  const PromptMessage({
+    required this.role,
+    required this.content,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'role': role.name,
+      'content': content.toJson(),
+    };
+  }
+}
+
+/// Prompt message roles
+enum PromptMessageRole {
+  user,
+  assistant,
+  system;
+}
+
+/// Cancellation token for async operations
+class CancellationToken {
+  bool _isCancelled = false;
+  final List<Function()> _callbacks = [];
+  
+  /// Whether the operation has been cancelled
+  bool get isCancelled => _isCancelled;
+  
+  /// Cancel the operation
+  void cancel() {
+    if (_isCancelled) return;
+    _isCancelled = true;
+    
+    // Notify all callbacks
+    for (final callback in _callbacks) {
+      callback();
+    }
+    _callbacks.clear();
+  }
+  
+  /// Register a callback to be called when cancelled
+  void onCancel(Function() callback) {
+    if (_isCancelled) {
+      // Already cancelled, call immediately
+      callback();
+    } else {
+      _callbacks.add(callback);
+    }
+  }
+  
+  /// Remove a callback
+  void removeCallback(Function() callback) {
+    _callbacks.remove(callback);
+  }
+  
+  /// Check if cancelled and throw if so
+  void throwIfCancelled() {
+    if (_isCancelled) {
+      throw CancelledException('Operation was cancelled');
+    }
+  }
+}
+
+/// Exception thrown when an operation is cancelled
+class CancelledException implements Exception {
+  final String message;
+  
+  CancelledException([this.message = 'Operation cancelled']);
+  
+  @override
+  String toString() => 'CancelledException: $message';
+}
+
+/// Batch request tracker for handling JSON-RPC batch requests
+class BatchRequestTracker {
+  final String batchId;
+  final int totalRequests;
+  final List<Map<String, dynamic>> responses = [];
+  final Set<dynamic> processedIds = {};
+  final DateTime createdAt = DateTime.now();
+  
+  BatchRequestTracker({
+    required this.batchId,
+    required this.totalRequests,
+  });
+  
+  /// Add a response to the batch
+  void addResponse(dynamic id, Map<String, dynamic> response) {
+    if (id != null && !processedIds.contains(id)) {
+      processedIds.add(id);
+      responses.add(response);
+    }
+  }
+  
+  /// Check if all requests have been processed
+  bool get isComplete => responses.length >= totalRequests;
+  
+  /// Get the batch response (array of responses)
+  List<Map<String, dynamic>> getBatchResponse() => List.unmodifiable(responses);
 }
