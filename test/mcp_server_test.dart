@@ -10,7 +10,7 @@ void main() {
       server = Server(
         name: 'Test Server',
         version: '1.0.0',
-        capabilities: const ServerCapabilities(
+        capabilities: ServerCapabilities.simple(
           tools: true,
           toolsListChanged: true,
           resources: true,
@@ -27,13 +27,13 @@ void main() {
     });
 
     test('Server created with correct configuration', () {
-      // Server doesn't expose name and version as public properties
-      // expect(server.name, equals('Test Server'));
-      // expect(server.version, equals('1.0.0'));
-      expect(server.capabilities.tools, isTrue);
-      expect(server.capabilities.resources, isTrue);
-      expect(server.capabilities.prompts, isTrue);
-      expect(server.capabilities.sampling, isTrue);
+      // Server does expose name and version as public properties
+      expect(server.name, equals('Test Server'));
+      expect(server.version, equals('1.0.0'));
+      expect(server.capabilities.hasTools, isTrue);
+      expect(server.capabilities.hasResources, isTrue);
+      expect(server.capabilities.hasPrompts, isTrue);
+      expect(server.capabilities.hasSampling, isTrue);
     });
 
     test('Server supports 2025-03-26 protocol version', () {
@@ -244,7 +244,7 @@ void main() {
       final samplingServer = Server(
         name: 'Sampling Server',
         version: '1.0.0',
-        capabilities: const ServerCapabilities(sampling: true),
+        capabilities: ServerCapabilities.simple(sampling: true),
       );
 
       // Set sampling handler

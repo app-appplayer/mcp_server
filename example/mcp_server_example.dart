@@ -24,7 +24,7 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
     final server = Server(
       name: 'Flutter MCP Demo',
       version: '1.0.0',
-      capabilities: ServerCapabilities(
+      capabilities: ServerCapabilities.simple(
         tools: true,
         toolsListChanged: true,
         resources: true,
@@ -47,9 +47,15 @@ Future<void> startMcpServer({required String mode, int port = 8080}) async {
       transport = result.get(); // This will throw if failed
     } else {
       _logger.debug('Starting server in SSE mode on port $port');
-      // TODO: Fix SSE transport creation - current API may not match
-      final stdioResult = McpServer.createStdioTransport(); // Fallback to stdio for now
-      transport = stdioResult.get();
+      final result = McpServer.createSseTransport(
+        SseServerConfig(
+          endpoint: '/sse',
+          messagesEndpoint: '/message',
+          host: 'localhost',
+          port: port,
+        ),
+      );
+      transport = result.get(); // This will throw if failed
     }
 
     // Set up transport closure handling
@@ -210,7 +216,7 @@ void _registerTools(Server server) {
               result = now.toIso8601String();
             } catch (e) {
               _logger.debug("[DateTime Tool] Error with ISO format: $e");
-              result = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} " +
+              result = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} "
                   "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
             }
             break;

@@ -40,6 +40,44 @@ class McpProtocol {
     }
     return null;
   }
+
+  /// Advanced version negotiation with date-based compatibility
+  static String? negotiateWithDateFallback(String? clientVersion, List<String> serverVersions) {
+    if (clientVersion == null) {
+      // Client didn't specify version, use latest
+      return serverVersions.first;
+    } 
+    
+    if (serverVersions.contains(clientVersion)) {
+      // Exact match
+      return clientVersion;
+    }
+    
+    // Try date-based compatibility
+    try {
+      final clientDate = DateTime.parse(clientVersion);
+      
+      // Find server versions that are equal or older than client version
+      final compatibleVersions = serverVersions
+          .map((v) => DateTime.tryParse(v))
+          .where((d) => d != null && d.compareTo(clientDate) <= 0)
+          .cast<DateTime>()
+          .toList();
+      
+      if (compatibleVersions.isNotEmpty) {
+        // Sort in descending order and take newest compatible
+        compatibleVersions.sort((a, b) => b.compareTo(a));
+        final index = serverVersions.indexWhere(
+          (v) => DateTime.tryParse(v)?.isAtSameMomentAs(compatibleVersions.first) ?? false
+        );
+        return index >= 0 ? serverVersions[index] : null;
+      }
+    } catch (e) {
+      // Invalid date format, fall back to null
+    }
+    
+    return null;
+  }
 }
 
 /// Standard MCP methods that must be implemented

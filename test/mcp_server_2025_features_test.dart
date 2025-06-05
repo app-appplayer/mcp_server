@@ -13,7 +13,7 @@ void main() {
       server = Server(
         name: 'Test Server 2025',
         version: '1.0.0',
-        capabilities: const ServerCapabilities(
+        capabilities: ServerCapabilities.simple(
           tools: true,
           toolsListChanged: true,
           resources: true,
@@ -507,7 +507,7 @@ void main() {
         final metricsServer = Server(
           name: 'Metrics Server',
           version: '1.0.0',
-          capabilities: const ServerCapabilities(),
+          capabilities: ServerCapabilities.simple(),
           enableMetrics: true,
         );
 

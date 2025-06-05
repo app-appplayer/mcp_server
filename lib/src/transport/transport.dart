@@ -5,9 +5,7 @@ import 'dart:io';
 import '../../logger.dart';
 import '../middleware/compression.dart';
 
-export 'websocket_transport.dart';
-export 'connection_manager.dart';
-export 'http_server_transport.dart';
+export 'streamable_http_server_transport.dart' hide mcpSessionIdHeader, lastEventIdHeader, contentTypeJson, contentTypeSse, CorsConfig;
 
 final Logger _logger = Logger('mcp_server.transport');
 

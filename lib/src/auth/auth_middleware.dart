@@ -32,20 +32,17 @@ class AuthResult {
   
   /// Create successful authentication result
   const AuthResult.success({
-    required Map<String, dynamic> userInfo,
-    List<String>? validatedScopes,
+    required this.userInfo,
+    this.validatedScopes,
   }) : isAuthenticated = true,
-       userInfo = userInfo,
-       validatedScopes = validatedScopes,
        error = null;
   
   /// Create failed authentication result
   const AuthResult.failure({
-    required String error,
+    required this.error,
   }) : isAuthenticated = false,
        userInfo = null,
-       validatedScopes = null,
-       error = error;
+       validatedScopes = null;
 }
 
 /// Token validation interface

@@ -4,12 +4,14 @@ import 'package:shelf/shelf.dart' as shelf;
 
 import 'src/server/server.dart';
 import 'src/transport/transport.dart';
+import 'src/protocol/capabilities.dart';
 import 'src/common/result.dart';
 
 export 'src/models/models.dart';
 export 'src/server/server.dart';
 export 'src/transport/transport.dart';
 export 'src/protocol/protocol.dart';
+export 'src/protocol/capabilities.dart';
 export 'src/annotations/tool_annotations.dart';
 export 'src/auth/auth_middleware.dart';
 export 'src/common/result.dart';
@@ -245,23 +247,57 @@ class McpServer {
     ));
   }
 
-  /// Create an HTTP transport with the given configuration
-  static Result<HttpServerTransport, Exception> createHttpTransport(
+
+  /// Create a StreamableHTTP transport with the given configuration
+  static Future<Result<StreamableHttpServerTransport, Exception>> createStreamableHttpTransportAsync(
     int port, {
     String endpoint = '/mcp',
     String host = 'localhost',
     List<int>? fallbackPorts,
-    String? authToken,
+    bool isJsonResponseEnabled = false,
+    String? sessionId,
+  }) async {
+    try {
+      final transport = StreamableHttpServerTransport(
+        config: StreamableHttpServerConfig(
+          endpoint: endpoint,
+          port: port,
+          host: host,
+          fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
+          isJsonResponseEnabled: isJsonResponseEnabled,
+        ),
+        sessionId: sessionId,
+      );
+      // Start the server and wait for it to be ready
+      await transport.start();
+      return Result.success(transport);
+    } catch (e) {
+      return Result.failure(Exception('Failed to create StreamableHTTP transport: $e'));
+    }
+  }
+
+  /// Create a StreamableHTTP transport with the given configuration (sync version)
+  static Result<StreamableHttpServerTransport, Exception> createStreamableHttpTransport(
+    int port, {
+    String endpoint = '/mcp',
+    String host = 'localhost',
+    List<int>? fallbackPorts,
+    bool isJsonResponseEnabled = false,
+    String? sessionId,
   }) {
-    return Results.catching(() => HttpServerTransport(
-      config: HttpServerConfig(
-        endpoint: endpoint,
-        port: port,
-        host: host,
-        fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
-        authToken: authToken,
-      ),
-    ));
+    return Results.catching(() {
+      final transport = StreamableHttpServerTransport(
+        config: StreamableHttpServerConfig(
+          endpoint: endpoint,
+          port: port,
+          host: host,
+          fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
+          isJsonResponseEnabled: isJsonResponseEnabled,
+        ),
+        sessionId: sessionId,
+      );
+      return transport;
+    });
   }
 
   /// Helper method to create a simple server configuration

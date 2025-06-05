@@ -12,7 +12,7 @@ void main() {
       server = Server(
         name: 'Test OAuth Server',
         version: '1.0.0',
-        capabilities: const ServerCapabilities(
+        capabilities: ServerCapabilities.simple(
           tools: true,
           resources: true,
           prompts: true,

@@ -4,8 +4,8 @@ import 'package:meta/meta.dart';
 import 'package:logging/logging.dart';
 
 import 'protocol.dart';
+import 'capabilities.dart';
 import '../common/result.dart';
-import '../server/server.dart';
 
 final _logger = Logger('jsonrpc_handler');
 
@@ -155,7 +155,7 @@ class JsonRpcHandler {
       _initialized = true;
 
       // Set default capabilities if not provided
-      _capabilities ??= const ServerCapabilities(
+      _capabilities ??= ServerCapabilities.simple(
         tools: true,
         toolsListChanged: true,
         resources: true,

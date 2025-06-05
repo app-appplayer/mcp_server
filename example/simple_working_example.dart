@@ -10,7 +10,7 @@ Future<void> main() async {
   final server = Server(
     name: 'Simple MCP Server',
     version: '1.0.0',
-    capabilities: const ServerCapabilities(
+    capabilities: ServerCapabilities.simple(
       tools: true,
       resources: true,
       prompts: true,

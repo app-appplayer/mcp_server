@@ -7,6 +7,7 @@ import '../../logger.dart';
 import '../models/models.dart';
 import '../transport/transport.dart';
 import '../protocol/protocol.dart';
+import '../protocol/capabilities.dart';
 import '../middleware/rate_limiter.dart';
 import '../metrics/metrics_collector.dart';
 import '../auth/auth_middleware.dart';
@@ -345,7 +346,7 @@ class Server implements ServerInterface {
     _logger.debug('Total tools: ${_tools.length}');
 
     // Notify clients about tool changes if connected and supported
-    if (isConnected && capabilities.tools && capabilities.toolsListChanged) {
+    if (isConnected && capabilities.hasTools && capabilities.toolsListChanged) {
       _broadcastNotification('tools/listChanged', {});
     }
     
@@ -382,7 +383,7 @@ class Server implements ServerInterface {
     _resourceHandlers[uri] = handler;
 
     // Notify clients about resource changes if connected and supported
-    if (isConnected && capabilities.resources && capabilities.resourcesListChanged) {
+    if (isConnected && capabilities.hasResources && capabilities.resourcesListChanged) {
       _broadcastNotification('resources/listChanged', {});
     }
     
@@ -412,7 +413,7 @@ class Server implements ServerInterface {
     _promptHandlers[name] = handler;
 
     // Notify clients about prompt changes if connected and supported
-    if (isConnected && capabilities.prompts && capabilities.promptsListChanged) {
+    if (isConnected && capabilities.hasPrompts && capabilities.promptsListChanged) {
       _broadcastNotification('prompts/listChanged', {});
     }
     
@@ -431,7 +432,7 @@ class Server implements ServerInterface {
     _toolHandlers.remove(name);
 
     // Notify clients about tool changes if connected and supported
-    if (isConnected && capabilities.tools && capabilities.toolsListChanged) {
+    if (isConnected && capabilities.hasTools && capabilities.toolsListChanged) {
       _broadcastNotification('tools/listChanged', {});
     }
     
@@ -456,7 +457,7 @@ class Server implements ServerInterface {
     _resourceCache.remove(uri);
 
     // Notify clients about resource changes if connected and supported
-    if (isConnected && capabilities.resources && capabilities.resourcesListChanged) {
+    if (isConnected && capabilities.hasResources && capabilities.resourcesListChanged) {
       _broadcastNotification('resources/listChanged', {});
     }
     
@@ -475,7 +476,7 @@ class Server implements ServerInterface {
     _promptHandlers.remove(name);
 
     // Notify clients about prompt changes if connected and supported
-    if (isConnected && capabilities.prompts && capabilities.promptsListChanged) {
+    if (isConnected && capabilities.hasPrompts && capabilities.promptsListChanged) {
       _broadcastNotification('prompts/listChanged', {});
     }
     
@@ -545,7 +546,7 @@ class Server implements ServerInterface {
     // Invalidate cache
     _resourceCache.remove(uri);
 
-    if (!isConnected || !capabilities.resources) return;
+    if (!isConnected || !capabilities.hasResources) return;
 
     final subscribers = _resourceSubscriptions[uri];
     if (subscribers == null || subscribers.isEmpty) return;
@@ -909,6 +910,7 @@ class Server implements ServerInterface {
 
   /// Handle a JSON-RPC request
   Future<void> _handleRequest(String sessionId, JsonRpcMessage request) async {
+    _logger.debug('🎯 _handleRequest called - sessionId: $sessionId, method: ${request.method}, id: ${request.id}');
     // Special case for initialize which determines protocol version
     if (request.method == 'initialize') {
       await _handleInitialize(sessionId, request);
@@ -1004,7 +1006,9 @@ class Server implements ServerInterface {
         break;
 
       case 'resources/list':
+        _logger.debug('🔍 Handling resources/list request...');
         await _handleResourcesList(sessionId, request);
+        _logger.debug('✅ resources/list handling completed');
         break;
 
       case 'resources/read':
@@ -1067,50 +1071,21 @@ class Server implements ServerInterface {
 
   /// Handle initialize request
   Future<void> _handleInitialize(String sessionId, JsonRpcMessage request) async {
-    // Handle protocol version negotiation
+    // Handle protocol version negotiation using centralized logic
     final clientVersion = request.params?['protocolVersion'] as String?;
-    String negotiatedVersion;
+    final negotiatedVersion = McpProtocol.negotiateWithDateFallback(
+      clientVersion, 
+      supportedProtocolVersions
+    );
 
-    if (clientVersion == null) {
-      // Client didn't specify version, use latest
-      negotiatedVersion = supportedProtocolVersions.last;
-    } else if (supportedProtocolVersions.contains(clientVersion)) {
-      // Client version is explicitly supported
-      negotiatedVersion = clientVersion;
-    } else {
-      // Try to find a compatible version (date-based comparison)
-      try {
-        final clientDate = DateTime.parse(clientVersion);
-
-        // Find supported versions that are equal or older than client version
-        final compatibleVersions = supportedProtocolVersions
-            .map((v) => DateTime.tryParse(v))
-            .where((d) => d != null && d.compareTo(clientDate) <= 0)
-            .cast<DateTime>()
-            .toList();
-
-        if (compatibleVersions.isNotEmpty) {
-          // Sort in descending order and take newest compatible
-          compatibleVersions.sort((a, b) => b.compareTo(a));
-          final index = supportedProtocolVersions.indexWhere(
-                  (v) => DateTime.tryParse(v)?.isAtSameMomentAs(compatibleVersions.first) ?? false);
-          if (index >= 0) {
-            negotiatedVersion = supportedProtocolVersions[index];
-          } else {
-            throw FormatException('No compatible version found');
-          }
-        } else {
-          throw FormatException('No compatible version found');
-        }
-      } catch (e) {
-        _sendErrorResponse(
-            sessionId,
-            request.id,
-            ErrorCode.incompatibleVersion,
-            'Unsupported protocol version: $clientVersion. Supported versions: ${supportedProtocolVersions.join(", ")}'
-        );
-        return;
-      }
+    if (negotiatedVersion == null) {
+      _sendErrorResponse(
+          sessionId,
+          request.id,
+          ErrorCode.incompatibleVersion,
+          'Unsupported protocol version: $clientVersion. Supported versions: ${supportedProtocolVersions.join(", ")}'
+      );
+      return;
     }
 
     // Store negotiated version in session
@@ -1156,7 +1131,7 @@ class Server implements ServerInterface {
   Future<void> _handleToolsList(String sessionId, JsonRpcMessage request) async {
     _logger.debug('Tools listing requested');
 
-    if (!capabilities.tools) {
+    if (!capabilities.hasTools) {
       _logger.debug('Tools capability not supported');
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Tools capability not supported');
       return;
@@ -1185,7 +1160,7 @@ class Server implements ServerInterface {
 
   /// Handle tools/call request
   Future<void> _handleToolCall(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.tools) {
+    if (!capabilities.hasTools) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Tools capability not supported');
       return;
     }
@@ -1226,19 +1201,26 @@ class Server implements ServerInterface {
 
   /// Handle resources/list request
   Future<void> _handleResourcesList(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.resources) {
+    _logger.debug('🔍 _handleResourcesList called - sessionId: $sessionId, requestId: ${request.id}');
+    
+    if (!capabilities.hasResources) {
+      _logger.debug('❌ Resources capability not supported');
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
 
+    _logger.debug('✅ Resources capability supported, listing resources...');
     final resourcesList = _resources.values.map((resource) => resource.toJson()).toList();
+    _logger.debug('📋 Found ${resourcesList.length} resources');
 
+    _logger.debug('📤 Sending response for sessionId: $sessionId, requestId: ${request.id}');
     _sendResponse(sessionId, request.id, {'resources': resourcesList});
+    _logger.debug('✅ Response sent successfully');
   }
 
   /// Handle resources/read request
   Future<void> _handleResourceRead(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.resources) {
+    if (!capabilities.hasResources) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
@@ -1322,7 +1304,7 @@ class Server implements ServerInterface {
 
   /// Handle resources/templates/list request
   Future<void> _handleResourceTemplatesList(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.resources) {
+    if (!capabilities.hasResources) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
@@ -1343,7 +1325,7 @@ class Server implements ServerInterface {
 
   /// Handle resources/subscribe request
   Future<void> _handleResourceSubscribe(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.resources) {
+    if (!capabilities.hasResources) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
@@ -1365,7 +1347,7 @@ class Server implements ServerInterface {
 
   /// Handle resources/unsubscribe request
   Future<void> _handleResourceUnsubscribe(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.resources) {
+    if (!capabilities.hasResources) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Resources capability not supported');
       return;
     }
@@ -1387,7 +1369,7 @@ class Server implements ServerInterface {
 
   /// Handle prompts/list request
   Future<void> _handlePromptsList(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.prompts) {
+    if (!capabilities.hasPrompts) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Prompts capability not supported');
       return;
     }
@@ -1398,7 +1380,7 @@ class Server implements ServerInterface {
 
   /// Handle prompts/get request
   Future<void> _handlePromptGet(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.prompts) {
+    if (!capabilities.hasPrompts) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Prompts capability not supported');
       return;
     }
@@ -1479,7 +1461,7 @@ class Server implements ServerInterface {
 
   /// Handle sampling/createMessage request
   Future<void> _handleSamplingCreateMessage(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.sampling) {
+    if (!capabilities.hasSampling) {
       _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Sampling capability not supported');
       return;
     }
@@ -1587,11 +1569,16 @@ class Server implements ServerInterface {
 
   /// Send a JSON-RPC response to specific session
   void _sendResponse(String sessionId, dynamic id, dynamic result, {String? batchId}) {
+    _logger.debug('🚀 _sendResponse called - sessionId: $sessionId, id: $id');
+    
     final session = _sessions[sessionId];
     if (session == null) {
-      _logger.error('Attempted to send response to non-existent session: $sessionId');
+      _logger.error('❌ Attempted to send response to non-existent session: $sessionId');
+      _logger.debug('Available sessions: ${_sessions.keys.toList()}');
       return;
     }
+    
+    _logger.debug('✅ Session found, creating response...');
 
     final response = {
       'jsonrpc': '2.0',
@@ -1608,7 +1595,9 @@ class Server implements ServerInterface {
       }
     }
 
+    _logger.debug('📤 Calling transport.send() with response...');
     session.transport.send(response);
+    _logger.debug('✅ transport.send() completed');
   }
 
   /// Send a JSON-RPC error response to specific session
@@ -1722,7 +1711,7 @@ class Server implements ServerInterface {
     final operation = _pendingOperations[operationId];
     if (operation != null) {
       operation.isCancelled = true;
-      _pendingOperations.remove(operationId);
+      // Don't remove from _pendingOperations yet, keep for status checking
       
       // Notify the session about cancellation
       _sendNotification(operation.sessionId, 'notifications/cancelled', {
@@ -1974,63 +1963,6 @@ class Server implements ServerInterface {
   }
 }
 
-/// Server capabilities configuration
-class ServerCapabilities {
-  /// Tool support
-  final bool tools;
-
-  /// Whether tools list changes are sent as notifications
-  final bool toolsListChanged;
-
-  /// Resource support
-  final bool resources;
-
-  /// Whether resources list changes are sent as notifications
-  final bool resourcesListChanged;
-
-  /// Prompt support
-  final bool prompts;
-
-  /// Whether prompts list changes are sent as notifications
-  final bool promptsListChanged;
-
-  /// Sampling support
-  final bool sampling;
-
-  /// Create a capabilities object with specified settings
-  const ServerCapabilities({
-    this.tools = false,
-    this.toolsListChanged = false,
-    this.resources = false,
-    this.resourcesListChanged = false,
-    this.prompts = false,
-    this.promptsListChanged = false,
-    this.sampling = false,
-  });
-
-  /// Convert capabilities to JSON
-  Map<String, dynamic> toJson() {
-    final result = <String, dynamic>{};
-
-    if (tools) {
-      result['tools'] = {'listChanged': toolsListChanged};
-    }
-
-    if (resources) {
-      result['resources'] = {'listChanged': resourcesListChanged};
-    }
-
-    if (prompts) {
-      result['prompts'] = {'listChanged': promptsListChanged};
-    }
-
-    if (sampling) {
-      result['sampling'] = {};
-    }
-
-    return result;
-  }
-}
 
 /// Error class for MCP-related errors
 class McpError implements Exception {

@@ -59,11 +59,11 @@ dart pub add mcp_server
 import 'package:mcp_server/mcp_server.dart';
 
 void main() {
-  // Create a server
-  final server = McpServer.createServer(
+  // Create a server with simple boolean capabilities
+  final server = Server(
     name: 'Example Server',
     version: '1.0.0',
-    capabilities: ServerCapabilities(
+    capabilities: ServerCapabilities.simple(
       tools: true,
       resources: true,
       prompts: true,
@@ -112,7 +112,7 @@ void main() {
         case 'divide':
           if (b == 0) {
             return CallToolResult(
-              [TextContent(text: 'Division by zero error')],
+              content: [TextContent(text: 'Division by zero error')],
               isError: true,
             );
           }
@@ -120,12 +120,12 @@ void main() {
           break;
         default:
           return CallToolResult(
-            [TextContent(text: 'Unknown operation: $operation')],
+            content: [TextContent(text: 'Unknown operation: $operation')],
             isError: true,
           );
       }
       
-      return CallToolResult([TextContent(text: 'Result: $result')]);
+      return CallToolResult(content: [TextContent(text: 'Result: $result')]);
     },
   );
 
@@ -139,12 +139,11 @@ void main() {
       final now = DateTime.now().toString();
       
       return ReadResourceResult(
-        content: now,
-        mimeType: 'text/plain',
         contents: [
-          ResourceContent(
+          ResourceContentInfo(
             uri: uri,
             text: now,
+            mimeType: 'text/plain',
           ),
         ],
       );
@@ -194,22 +193,77 @@ void main() {
   );
 
   // Connect to transport
-  final transport = McpServer.createStdioTransport();
+  final transportResult = McpServer.createStdioTransport();
+  final transport = transportResult.get();
   server.connect(transport);
 }
 ```
 
 ## Core Concepts
 
+### Server Capabilities
+
+The MCP Server supports two ways to configure capabilities:
+
+#### Simple Boolean Configuration
+For basic usage and testing, use `ServerCapabilities.simple()`:
+
+```dart
+final server = Server(
+  name: 'Simple Server',
+  version: '1.0.0',
+  capabilities: ServerCapabilities.simple(
+    tools: true,
+    toolsListChanged: true,
+    resources: true,
+    resourcesListChanged: true,
+    prompts: true,
+    promptsListChanged: true,
+    sampling: true,
+    logging: true,
+    progress: true,
+  ),
+);
+```
+
+#### Advanced Object-Based Configuration
+For production use with detailed capability control:
+
+```dart
+final server = Server(
+  name: 'Advanced Server',
+  version: '1.0.0',
+  capabilities: ServerCapabilities(
+    tools: ToolsCapability(
+      listChanged: true,
+      supportsProgress: true,
+      supportsCancellation: true,
+    ),
+    resources: ResourcesCapability(
+      listChanged: true,
+      subscribe: true,
+    ),
+    prompts: PromptsCapability(
+      listChanged: true,
+    ),
+    sampling: SamplingCapability(),
+    logging: LoggingCapability(),
+    progress: ProgressCapability(
+      supportsProgress: true,
+    ),
+  ),
+);
+```
+
 ### Server
 
 The `Server` class is your core interface to the MCP protocol. It handles connection management, protocol compliance, and message routing:
 
 ```dart
-final server = McpServer.createServer(
+final server = Server(
   name: 'My App',
   version: '1.0.0',
-  capabilities: ServerCapabilities(
+  capabilities: ServerCapabilities.simple(
     tools: true,
     resources: true,
     prompts: true,
@@ -232,12 +286,11 @@ server.addResource(
     final configData = "app_name=MyApp\nversion=1.0.0\ndebug=false";
     
     return ReadResourceResult(
-      content: configData,
-      mimeType: 'text/plain',
       contents: [
-        ResourceContent(
+        ResourceContentInfo(
           uri: uri,
           text: configData,
+          mimeType: 'text/plain',
         ),
       ],
     );
@@ -265,12 +318,11 @@ server.addResource(
     final content = await File(path).readAsString();
     
     return ReadResourceResult(
-      content: content,
-      mimeType: 'text/plain',
       contents: [
-        ResourceContent(
+        ResourceContentInfo(
           uri: uri,
           text: content,
+          mimeType: 'text/plain',
         ),
       ],
     );
@@ -315,7 +367,7 @@ server.addTool(
         break;
     }
     
-    return CallToolResult([TextContent(text: result)]);
+    return CallToolResult(content: [TextContent(text: result)]);
   },
 );
 ```
@@ -378,18 +430,17 @@ The MCP Server provides a powerful stream-based system for monitoring client ses
 
 ```dart
 // Create a logger
-final logger = Logger.getLogger('mcp_server.sessions');
-logger.configure(level: LogLevel.info, includeTimestamp: true);
+final logger = Logger('mcp_server.sessions');
 
 // Listen for client connections
 server.onConnect.listen((session) {
-  logger.info('Client connected', data: {'sessionId': session.id});
+  logger.info('Client connected: ${session.id}');
   // Initialize session resources
 });
 
 // Listen for client disconnections
 server.onDisconnect.listen((session) {
-  logger.info('Client disconnected', data: {'sessionId': session.id});
+  logger.info('Client disconnected: ${session.id}');
   // Clean up session resources
 });
 ```
@@ -412,7 +463,7 @@ The `ClientSession` object contains useful information:
        // Normal event handling
      },
      onError: (error) {
-       logger.error('Error in connection stream: $error');
+       logger.severe('Error in connection stream: $error');
      },
    );
    ```
@@ -436,8 +487,9 @@ The `ClientSession` object contains useful information:
 For command-line tools and direct integrations:
 
 ```dart
-final transport = McpServer.createStdioTransport();
-await server.connect(transport);
+final transportResult = McpServer.createStdioTransport();
+final transport = transportResult.get();
+server.connect(transport);
 ```
 
 ### Server-Sent Events (SSE)
@@ -445,12 +497,14 @@ await server.connect(transport);
 For HTTP-based communication:
 
 ```dart
-final transport = McpServer.createSseTransport(
+final sseConfig = SseServerConfig(
   endpoint: '/sse',
   messagesEndpoint: '/messages',
   port: 8080,
 );
-await server.connect(transport);
+final transportResult = McpServer.createSseTransport(sseConfig);
+final transport = transportResult.get();
+server.connect(transport);
 ```
 
 ## Logging
@@ -459,29 +513,25 @@ The package includes a comprehensive logging utility with customizable levels an
 
 ```dart
 // Create a named logger
-final logger = Logger.getLogger('mcp_server.example');
-
-// Configure the logger
-logger.configure(
-  level: LogLevel.debug,          // Show debug messages and above
-  includeTimestamp: true,         // Include timestamps in log messages
-  useColor: true,                 // Use ANSI colors for different log levels
-);
+final logger = Logger('mcp_server.example');
 
 // Log at different levels
-logger.error('Connection failed: unable to connect to transport');
+logger.severe('Connection failed: unable to connect to transport');
 logger.warning('Resource cache is approaching capacity limit');
 logger.info('Server started successfully on port 8080');
-logger.debug('Session ${session.id} initialized with protocol version ${session.negotiatedProtocolVersion}');
+logger.fine('Session initialized with protocol version');
 
-// Log with structured format
-final operationId = server.registerOperation(sessionId, 'tool:calculator');
-logger.info('Operation registered', data: {
-  'operationId': operationId,
-  'sessionId': sessionId,
-  'type': 'tool:calculator',
-  'timestamp': DateTime.now().toIso8601String(),
-});
+// Send structured logs to MCP client
+server.sendLog(
+  McpLogLevel.info, 
+  'Operation registered',
+  data: {
+    'operationId': 'op-123',
+    'sessionId': 'session-456',
+    'type': 'tool:calculator',
+    'timestamp': DateTime.now().toIso8601String(),
+  }
+);
 ```
 
 ## MCP Primitives
@@ -554,7 +604,7 @@ server.addTool(
     for (int i = 0; i < 10; i++) {
       // Check if operation was cancelled
       if (server.isOperationCancelled(operationId)) {
-        return CallToolResult([TextContent(text: 'Operation cancelled')], isError: true);
+        return CallToolResult(content: [TextContent(text: 'Operation cancelled')], isError: true);
       }
       
       // Update progress (0.0 to 1.0)
@@ -564,7 +614,7 @@ server.addTool(
       await Future.delayed(Duration(seconds: 1));
     }
     
-    return CallToolResult([TextContent(text: 'Operation completed successfully')]);
+    return CallToolResult(content: [TextContent(text: 'Operation completed successfully')]);
   },
 );
 ```
@@ -577,16 +627,14 @@ The server provides built-in health metrics:
 // Get server health statistics
 final health = server.getHealth();
 
-final logger = Logger.getLogger('mcp_server.health');
-logger.configure(level: LogLevel.info, includeTimestamp: true);
+final logger = Logger('mcp_server.health');
 
-logger.info('Server Health Summary', data: {
-  'running': health.isRunning,
-  'sessions': health.connectedSessions,
-  'uptime': '${health.uptime.inHours}h ${health.uptime.inMinutes % 60}m',
-  'tools': health.registeredTools,
-  'resources': health.registeredResources,
-});
+logger.info('Server Health Summary - '
+    'Running: ${health.isRunning}, '
+    'Sessions: ${health.connectedSessions}, '
+    'Uptime: ${health.uptime.inHours}h ${health.uptime.inMinutes % 60}m, '
+    'Tools: ${health.registeredTools}, '
+    'Resources: ${health.registeredResources}');
 
 // Track custom metrics
 server.incrementMetric('api_calls');
@@ -603,11 +651,11 @@ The MCP Server library includes standardized error codes and error handling mech
 try {
   // Attempt an operation
   final result = await performOperation();
-  return CallToolResult([TextContent(text: result)]);
+  return CallToolResult(content: [TextContent(text: result)]);
 } catch (e) {
   // Return an error result
   return CallToolResult(
-    [TextContent(text: 'Operation failed: ${e.toString()}')],
+    content: [TextContent(text: 'Operation failed: ${e.toString()}')],
     isError: true,
   );
 }

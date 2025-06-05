@@ -68,6 +68,45 @@ class ServerCapabilities {
     
     return result;
   }
+
+  /// Helper getters for backward compatibility with old boolean-based API
+  bool get hasTools => tools != null;
+  bool get hasResources => resources != null;
+  bool get hasPrompts => prompts != null;
+  bool get hasLogging => logging != null;
+  bool get hasSampling => sampling != null;
+  bool get hasRoots => roots != null;
+  bool get hasProgress => progress != null;
+
+  bool get toolsListChanged => tools?.listChanged ?? false;
+  bool get resourcesListChanged => resources?.listChanged ?? false;
+  bool get promptsListChanged => prompts?.listChanged ?? false;
+  bool get rootsListChanged => roots?.listChanged ?? false;
+
+  /// Create a simple capabilities configuration with boolean flags
+  factory ServerCapabilities.simple({
+    bool tools = false,
+    bool toolsListChanged = false,
+    bool resources = false,
+    bool resourcesListChanged = false,
+    bool prompts = false,
+    bool promptsListChanged = false,
+    bool sampling = false,
+    bool logging = false,
+    bool roots = false,
+    bool rootsListChanged = false,
+    bool progress = false,
+  }) {
+    return ServerCapabilities(
+      tools: tools ? ToolsCapability(listChanged: toolsListChanged) : null,
+      resources: resources ? ResourcesCapability(listChanged: resourcesListChanged) : null,
+      prompts: prompts ? PromptsCapability(listChanged: promptsListChanged) : null,
+      logging: logging ? const LoggingCapability() : null,
+      sampling: sampling ? const SamplingCapability() : null,
+      roots: roots ? RootsCapability(listChanged: rootsListChanged) : null,
+      progress: progress ? const ProgressCapability() : null,
+    );
+  }
 }
 
 /// Tools capability
@@ -186,31 +225,3 @@ class ProgressCapability {
   }
 }
 
-/// Protocol version management
-@immutable
-class McpProtocolVersion {
-  /// MCP 2024-11-05 protocol version
-  static const String v2024_11_05 = "2024-11-05";
-  
-  /// MCP 2025-03-26 protocol version
-  static const String v2025_03_26 = "2025-03-26";
-  
-  /// Latest supported protocol version
-  static const String latest = v2025_03_26;
-  
-  /// All supported protocol versions (newest first)
-  static const List<String> supported = [v2025_03_26, v2024_11_05];
-  
-  /// Check if a version is supported
-  static bool isSupported(String version) => supported.contains(version);
-  
-  /// Negotiate the best protocol version between client and server
-  static String? negotiate(List<String> clientVersions, List<String> serverVersions) {
-    for (final serverVersion in serverVersions) {
-      if (clientVersions.contains(serverVersion)) {
-        return serverVersion;
-      }
-    }
-    return null;
-  }
-}

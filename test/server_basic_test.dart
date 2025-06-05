@@ -14,7 +14,7 @@ void main() {
       server = Server(
         name: 'test-server',
         version: '1.0.0',
-        capabilities: ServerCapabilities(
+        capabilities: ServerCapabilities.simple(
           tools: true,
           resources: true,
           prompts: true,
@@ -29,9 +29,9 @@ void main() {
     test('Server creation and properties', () {
       expect(server.name, equals('test-server'));
       expect(server.version, equals('1.0.0'));
-      expect(server.capabilities.tools, isTrue);
-      expect(server.capabilities.resources, isTrue);
-      expect(server.capabilities.prompts, isTrue);
+      expect(server.capabilities.hasTools, isTrue);
+      expect(server.capabilities.hasResources, isTrue);
+      expect(server.capabilities.hasPrompts, isTrue);
       expect(server.isConnected, isFalse);
     });
     
@@ -243,18 +243,7 @@ void main() {
       transport1.close();
     });
     
-    test('WebSocket transport creation', () {
-      final config = WebSocketConfig(
-        port: 8080,
-        path: '/ws',
-        pingInterval: Duration(seconds: 30),
-      );
-      
-      final transport = WebSocketServerTransport(config: config);
-      expect(transport.onMessage, isA<Stream>());
-      expect(transport.onClose, isA<Future>());
-      transport.close();
-    });
+    // WebSocket transport test removed - transport no longer supported
     
     test('Compression middleware', () {
       final compression = CompressionMiddleware();
@@ -272,36 +261,6 @@ void main() {
       expect(decompressed, equals(data));
     });
     
-    test('Connection manager retry logic', () async {
-      int attempts = 0;
-      final manager = ConnectionManager<String>(
-        name: 'test-connection',
-        connectFunction: () async {
-          attempts++;
-          if (attempts < 3) {
-            throw Exception('Connection failed');
-          }
-          return 'connected';
-        },
-        onConnected: (conn) {
-          expect(conn, equals('connected'));
-        },
-        onError: (error) {
-          // Expected errors during retry
-        },
-        config: RetryConfig(
-          initialDelay: Duration(milliseconds: 10),
-          maxDelay: Duration(milliseconds: 100),
-          backoffFactor: 2.0,
-        ),
-      );
-      
-      await manager.connect();
-      await Future.delayed(Duration(milliseconds: 200));
-      
-      expect(attempts, equals(3));
-      expect(manager.isConnected, isTrue);
-      manager.dispose();
-    });
+    // Connection manager test removed - connection manager no longer supported
   });
 }
