@@ -1,5 +1,5 @@
 /// MCP 2025-03-26 StreamableHTTP Server Transport Implementation
-/// Fully compliant with Python MCP SDK specification
+/// Fully compliant with MCP standard specification
 library;
 
 import 'dart:async';
@@ -51,6 +51,11 @@ class StreamableHttpServerConfig {
   /// Enable JSON response mode instead of SSE (default: false for streaming)
   final bool isJsonResponseEnabled;
   
+  /// Response mode for JSON: 'sync' or 'async'
+  /// - sync: Direct 200 OK response with JSON body
+  /// - async: 202 Accepted with polling mechanism
+  final String jsonResponseMode;
+  
   const StreamableHttpServerConfig({
     this.endpoint = '/mcp',
     this.host = 'localhost',
@@ -60,6 +65,7 @@ class StreamableHttpServerConfig {
     this.maxRequestSize = 4 * 1024 * 1024, // 4MB
     this.requestTimeout = const Duration(seconds: 30),
     this.isJsonResponseEnabled = false, // StreamableHTTP uses SSE by default
+    this.jsonResponseMode = 'sync', // Default to synchronous JSON responses
   });
 }
 
@@ -100,7 +106,7 @@ class SseStreamInfo {
 }
 
 /// MCP 2025-03-26 StreamableHTTP Server Transport Implementation
-/// Supports both JSON responses and SSE streaming according to Python MCP SDK
+/// Supports both JSON responses and SSE streaming according to MCP standard
 class StreamableHttpServerTransport implements ServerTransport {
   final StreamableHttpServerConfig config;
   final _messageController = StreamController<dynamic>();
@@ -110,20 +116,36 @@ class StreamableHttpServerTransport implements ServerTransport {
   bool _isClosed = false;
   
   // Session management
-  final String _sessionId;
+  String _sessionId;
   bool _terminated = false;
+  
+  /// Get the session ID for this transport
+  String get sessionId => _sessionId;
+  
+  // Initialize flag to track first message
+  bool _isFirstMessage = true;
   
   // Request tracking for JSON responses
   final Map<dynamic, _PendingRequest> _pendingRequests = {};
   
+  // Completers for synchronous JSON mode
+  final Map<dynamic, Completer<Map<String, dynamic>>> _pendingCompleters = {};
+  
+  // Response store for asynchronous JSON mode
+  final Map<String, Map<String, dynamic>> _responseStore = {};
+  final Map<String, DateTime> _responseTimestamps = {};
+  
   // SSE streams per request ID for streaming responses
   final Map<dynamic, SseStreamInfo> _sseStreams = {};
   
-  // Message router for proper request/response matching like Python SDK
+  // Message router for proper request/response matching
   final Map<dynamic, StreamController<dynamic>> _messageRouters = {};
   
   // GET stream for server-initiated messages (standalone SSE stream)
   SseStreamInfo? _getStream;
+  
+  // Queue for responses waiting for GET stream in JSON mode
+  final List<EventMessage> _pendingResponseQueue = [];
   
   // Event ID counter for resumability
   int _eventIdCounter = 0;
@@ -131,12 +153,17 @@ class StreamableHttpServerTransport implements ServerTransport {
   // Event store for resumability (simplified implementation)
   final Map<String, EventMessage> _eventStore = {};
   
+  // Timer for cleanup of old responses
+  Timer? _cleanupTimer;
+  
   StreamableHttpServerTransport({
     required this.config,
     String? sessionId,
   }) : _sessionId = sessionId ?? _generateSessionId() {
-    // Start server immediately like HTTP transport
-    start();
+    // Start cleanup timer for async mode
+    if (config.isJsonResponseEnabled && config.jsonResponseMode == 'async') {
+      _cleanupTimer = Timer.periodic(Duration(minutes: 1), (_) => _cleanupOldResponses());
+    }
   }
   
   static String _generateSessionId() {
@@ -213,9 +240,28 @@ class StreamableHttpServerTransport implements ServerTransport {
         return;
       }
       
-      if (request.uri.path != config.endpoint) {
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
+      // Normalize paths to handle trailing slashes
+      final requestPath = request.uri.path.endsWith('/') && request.uri.path.length > 1
+          ? request.uri.path.substring(0, request.uri.path.length - 1)
+          : request.uri.path;
+      final configEndpoint = config.endpoint.endsWith('/') && config.endpoint.length > 1
+          ? config.endpoint.substring(0, config.endpoint.length - 1)
+          : config.endpoint;
+      
+      // Check if this is a response polling request (async mode)
+      if (config.isJsonResponseEnabled && 
+          config.jsonResponseMode == 'async' &&
+          requestPath.startsWith('$configEndpoint/responses/')) {
+        await _handleResponsePolling(request);
+        return;
+      }
+      
+      if (requestPath != configEndpoint) {
+        _sendErrorResponse(
+          request.response,
+          'Not Found',
+          HttpStatus.notFound,
+        );
         return;
       }
       
@@ -241,12 +287,13 @@ class StreamableHttpServerTransport implements ServerTransport {
             HttpStatus.methodNotAllowed,
           );
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
       _logger.error('Error handling HTTP request: $e');
+      _logger.debug('Stack trace: $stackTrace');
       try {
         _sendErrorResponse(
           request.response,
-          'Internal Server Error',
+          'Internal Server Error: ${e.toString()}',
           HttpStatus.internalServerError,
         );
       } catch (_) {
@@ -258,6 +305,8 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// Handle OPTIONS request for CORS
   Future<void> _handleOptionsRequest(HttpRequest request) async {
     request.response.statusCode = HttpStatus.ok;
+    request.response.headers.set('Content-Type', contentTypeJson);
+    request.response.headers.set('Content-Length', '0');
     await request.response.close();
   }
   
@@ -334,25 +383,96 @@ class StreamableHttpServerTransport implements ServerTransport {
         _messageController.add(jsonRpcRequest);
       }
       
-      // Return 204 No Content like Python SDK
-      request.response.statusCode = HttpStatus.noContent;
+      // Return 202 Accepted for all notifications
+      request.response.statusCode = HttpStatus.accepted;
+      request.response.headers.set('Content-Type', contentTypeJson);
+      request.response.headers.set('Content-Length', '0');
+      request.response.headers.set(mcpSessionIdHeader, _sessionId);
       await request.response.close();
       return;
     }
     
-    // Handle request with response - choose response mode
+    // Handle request with ID based on mode
     if (config.isJsonResponseEnabled) {
-      // JSON response mode (simpler mode)
-      await _handleJsonResponse(request, jsonRpcRequest);
+      // JSON mode
+      if (config.jsonResponseMode == 'sync') {
+        // Synchronous JSON mode: wait for response and return directly
+        await _handleSyncJsonResponse(request, jsonRpcRequest);
+      } else {
+        // Asynchronous JSON mode: return 202 with polling location
+        await _handleAsyncJsonResponse(request, jsonRpcRequest);
+      }
     } else {
       // SSE streaming mode (default for StreamableHTTP)
       await _handleSseResponse(request, jsonRpcRequest);
     }
   }
   
-  /// Handle request with JSON response
-  Future<void> _handleJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
+  /// Handle synchronous JSON response mode
+  Future<void> _handleSyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
     final requestId = jsonRpcRequest['id'];
+    
+    // Check if this is an initialize request
+    final isInitialize = jsonRpcRequest['method'] == 'initialize';
+    
+    // Create completer for this request
+    final completer = Completer<Map<String, dynamic>>();
+    _pendingCompleters[requestId] = completer;
+    _logger.debug('Created completer for request ID: $requestId (type: ${requestId.runtimeType})');
+    
+    // Send to message controller
+    if (!_messageController.isClosed) {
+      _messageController.add(jsonRpcRequest);
+    }
+    
+    try {
+      // Wait for response with timeout
+      final response = await completer.future.timeout(
+        config.requestTimeout,
+        onTimeout: () => throw TimeoutException('Request timeout'),
+      );
+      
+      // For initialize requests, mark as initialized
+      if (isInitialize && response['result'] != null) {
+        _isFirstMessage = false;
+        _logger.debug('StreamableHTTP session initialized successfully');
+      }
+      
+      // Send direct JSON response
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
+      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      // Use UTF-8 encoding to handle international characters
+      final responseBytes = utf8.encode(json.encode(response));
+      request.response.add(responseBytes);
+      await request.response.close();
+    } catch (e, stackTrace) {
+      _logger.error('Error in _handleSyncJsonResponse: $e');
+      _logger.debug('Stack trace: $stackTrace');
+      
+      // Send error response
+      final errorResponse = {
+        'jsonrpc': '2.0',
+        'error': {
+          'code': -32603,
+          'message': 'Internal error: ${e.toString()}',
+        },
+        'id': requestId,
+      };
+      
+      request.response.statusCode = HttpStatus.internalServerError;
+      request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
+      request.response.add(utf8.encode(json.encode(errorResponse)));
+      await request.response.close();
+    } finally {
+      _pendingCompleters.remove(requestId);
+    }
+  }
+  
+  /// Handle asynchronous JSON response mode with polling
+  Future<void> _handleAsyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
+    final requestId = jsonRpcRequest['id'];
+    final responseKey = '$_sessionId:$requestId';
     
     // Store pending request
     _pendingRequests[requestId] = _PendingRequest(
@@ -360,13 +480,66 @@ class StreamableHttpServerTransport implements ServerTransport {
       timestamp: DateTime.now(),
     );
     
-    // Create message router for this request like Python SDK
-    final messageRouter = StreamController<dynamic>();
-    _messageRouters[requestId] = messageRouter;
-    
     // Send to message controller
     if (!_messageController.isClosed) {
       _messageController.add(jsonRpcRequest);
+    }
+    
+    // Return 202 Accepted with Location header
+    request.response.statusCode = HttpStatus.accepted;
+    request.response.headers.set('Content-Type', contentTypeJson);
+    request.response.headers.set(mcpSessionIdHeader, _sessionId);
+    request.response.headers.set('Location', '${config.endpoint}/responses/$responseKey');
+    await request.response.close();
+  }
+  
+  /// Handle response polling for async JSON mode
+  Future<void> _handleResponsePolling(HttpRequest request) async {
+    final path = request.uri.path;
+    final basePath = config.endpoint.endsWith('/') 
+        ? config.endpoint.substring(0, config.endpoint.length - 1) 
+        : config.endpoint;
+    
+    final responseKey = path.substring('$basePath/responses/'.length);
+    
+    _setCorsHeaders(request.response);
+    
+    if (_responseStore.containsKey(responseKey)) {
+      final response = _responseStore[responseKey]!;
+      
+      // Send the stored response
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
+      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      request.response.add(utf8.encode(json.encode(response)));
+      await request.response.close();
+      
+      // Clean up
+      _responseStore.remove(responseKey);
+      _responseTimestamps.remove(responseKey);
+    } else {
+      // Response not ready yet
+      request.response.statusCode = HttpStatus.noContent;
+      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      await request.response.close();
+    }
+  }
+  
+  /// Clean up old responses in async mode
+  void _cleanupOldResponses() {
+    final now = DateTime.now();
+    final timeout = Duration(minutes: 5);
+    
+    final keysToRemove = <String>[];
+    _responseTimestamps.forEach((key, timestamp) {
+      if (now.difference(timestamp) > timeout) {
+        keysToRemove.add(key);
+      }
+    });
+    
+    for (final key in keysToRemove) {
+      _responseStore.remove(key);
+      _responseTimestamps.remove(key);
     }
   }
   
@@ -387,7 +560,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       response: request.response,
     );
     
-    // Create message router for this request like Python SDK
+    // Create message router for this request
     final messageRouter = StreamController<dynamic>();
     _messageRouters[requestId] = messageRouter;
     
@@ -416,11 +589,17 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   /// Handle GET request (standalone SSE stream for server-initiated messages)
   Future<void> _handleGetRequest(HttpRequest request) async {
+    _logger.debug('Handling GET request');
+    _logger.debug('Headers: ${request.headers}');
+    
     // Validate Accept header - more lenient for GET requests
     final acceptHeader = request.headers.value('accept');
+    _logger.debug('Accept header: $acceptHeader');
+    
     if (acceptHeader != null && 
         !acceptHeader.contains(contentTypeSse) && 
         !acceptHeader.contains('*/*')) {
+      _logger.debug('Rejecting GET request - wrong Accept header');
       _sendErrorResponse(
         request.response,
         'Not Acceptable: Client must accept text/event-stream',
@@ -430,11 +609,15 @@ class StreamableHttpServerTransport implements ServerTransport {
     }
     
     if (!await _validateSession(request)) {
+      _logger.debug('Session validation failed for GET request');
       return;
     }
     
+    _logger.debug('Session validated successfully');
+    
     // Check if GET stream already exists
     if (_getStream != null) {
+      _logger.debug('GET stream already exists - rejecting');
       _sendErrorResponse(
         request.response,
         'Conflict: Only one SSE stream is allowed per session',
@@ -477,6 +660,17 @@ class StreamableHttpServerTransport implements ServerTransport {
         _getStream = null;
       },
     );
+    
+    // Send any queued responses (for JSON mode)
+    if (config.isJsonResponseEnabled && _pendingResponseQueue.isNotEmpty) {
+      _logger.debug('Sending ${_pendingResponseQueue.length} queued responses');
+      for (final event in _pendingResponseQueue) {
+        _sendSseEvent(_getStream!.controller, event.message, eventId: event.eventId);
+      }
+      _pendingResponseQueue.clear();
+    } else {
+      _logger.debug('No queued responses to send. Queue size: ${_pendingResponseQueue.length}');
+    }
   }
   
   /// Handle DELETE request (terminate session)
@@ -502,7 +696,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     await request.response.close();
   }
   
-  /// Validate Accept headers - Python SDK behavior: POST requires both JSON and SSE
+  /// Validate Accept headers - MCP spec: POST requires both JSON and SSE
   bool _validateAcceptHeaders(HttpRequest request) {
     final acceptHeader = request.headers.value('accept') ?? '';
     
@@ -528,17 +722,27 @@ class StreamableHttpServerTransport implements ServerTransport {
     return contentType.startsWith(contentTypeJson);
   }
   
-  /// Validate session - Python SDK behavior
+  /// Validate session
   Future<bool> _validateSession(HttpRequest request) async {
     final sessionId = request.headers.value(mcpSessionIdHeader);
+    _logger.debug('Validating session - client ID: $sessionId, server ID: $_sessionId');
     
     // If no session ID is provided, allow it for initial requests
     if (sessionId == null) {
+      _logger.debug('No session ID provided - allowing request');
+      return true;
+    }
+    
+    // For first message (initialize), adopt the client's session ID
+    if (_isFirstMessage) {
+      _logger.debug('First message detected - adopting client session ID: $sessionId');
+      _sessionId = sessionId;
       return true;
     }
     
     // If session ID is provided, it must match
     if (sessionId != _sessionId) {
+      _logger.debug('Session ID mismatch! Client: $sessionId, Server: $_sessionId');
       _sendErrorResponse(
         request.response,
         'Forbidden: Invalid session ID',
@@ -547,6 +751,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       return false;
     }
     
+    _logger.debug('Session ID matches');
     return true;
   }
   
@@ -578,14 +783,14 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// Send error response
   void _sendErrorResponse(HttpResponse response, String message, int statusCode) {
     response.statusCode = statusCode;
-    response.headers.set('Content-Type', contentTypeJson);
+    response.headers.set('Content-Type', 'application/json; charset=utf-8');
     response.headers.set(mcpSessionIdHeader, _sessionId);
     
     final error = {
       'error': message,
     };
     
-    response.write(jsonEncode(error));
+    response.add(utf8.encode(jsonEncode(error)));
     response.close();
   }
   
@@ -598,7 +803,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     String? data,
   ) {
     response.statusCode = HttpStatus.ok;
-    response.headers.set('Content-Type', contentTypeJson);
+    response.headers.set('Content-Type', 'application/json; charset=utf-8');
     response.headers.set(mcpSessionIdHeader, _sessionId);
     
     final errorResponse = {
@@ -611,7 +816,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       if (id != null) 'id': id,
     };
     
-    response.write(jsonEncode(errorResponse));
+    response.add(utf8.encode(jsonEncode(errorResponse)));
     response.close();
   }
   
@@ -645,35 +850,46 @@ class StreamableHttpServerTransport implements ServerTransport {
       
       if (message is Map && message.containsKey('id')) {
         final requestId = message['id'];
+        _logger.debug('Response ID: $requestId (type: ${requestId.runtimeType})');
         
         // Generate event ID for resumability
         final eventId = (_eventIdCounter++).toString();
         
         // Store event for resumability
         _eventStore[eventId] = EventMessage(
-          message: message as Map<String, dynamic>,
+          message: Map<String, dynamic>.from(message),
           eventId: eventId,
         );
         
-        // Check if this is a response to a specific request
-        if (_pendingRequests.containsKey(requestId)) {
-          // JSON response mode
-          final pendingRequest = _pendingRequests.remove(requestId)!;
-          
-          pendingRequest.request.response.statusCode = HttpStatus.ok;
-          pendingRequest.request.response.headers.set('Content-Type', contentTypeJson);
-          pendingRequest.request.response.headers.set(mcpSessionIdHeader, _sessionId);
-          
-          pendingRequest.request.response.write(jsonEncode(message));
-          pendingRequest.request.response.close();
-          
-          // Clean up message router
-          _messageRouters.remove(requestId)?.close();
-          
+        // Handle based on mode
+        if (config.isJsonResponseEnabled) {
+          if (config.jsonResponseMode == 'sync') {
+            // Synchronous JSON mode: complete the pending completer
+            if (_pendingCompleters.containsKey(requestId)) {
+              try {
+                _logger.debug('Completing completer for request ID: $requestId');
+                _pendingCompleters[requestId]!.complete(Map<String, dynamic>.from(message));
+                _pendingCompleters.remove(requestId);
+                _logger.debug('Successfully completed completer for request ID: $requestId');
+              } catch (e, stackTrace) {
+                _logger.error('Error completing completer for request ID $requestId: $e');
+                _logger.debug('Stack trace: $stackTrace');
+              }
+            } else {
+              _logger.warning('No pending completer for response ID: $requestId');
+              _logger.debug('Available completers: ${_pendingCompleters.keys.toList()}');
+            }
+          } else {
+            // Asynchronous JSON mode: store response for polling
+            final responseKey = '$_sessionId:$requestId';
+            _responseStore[responseKey] = Map<String, dynamic>.from(message);
+            _responseTimestamps[responseKey] = DateTime.now();
+            _pendingRequests.remove(requestId);
+          }
         } else if (_sseStreams.containsKey(requestId)) {
           // SSE response for specific request
           final stream = _sseStreams[requestId]!;
-          _sendSseEvent(stream.controller, message, eventId: eventId);
+          _sendSseEvent(stream.controller, Map<String, dynamic>.from(message), eventId: eventId);
           
           // If this is a response or error, close the stream
           if (message.containsKey('result') || message.containsKey('error')) {
@@ -681,6 +897,11 @@ class StreamableHttpServerTransport implements ServerTransport {
             _sseStreams.remove(requestId);
             _messageRouters.remove(requestId)?.close();
           }
+        } else {
+          // Log when we can't find a pending request for a response
+          _logger.warning('No pending request found for response with ID: $requestId');
+          _logger.debug('Current pending requests: ${_pendingRequests.keys.toList()}');
+          _logger.debug('Current SSE streams: ${_sseStreams.keys.toList()}');
         }
       } else {
         // Notification or server-initiated message
@@ -688,10 +909,10 @@ class StreamableHttpServerTransport implements ServerTransport {
         if (_getStream != null) {
           final eventId = (_eventIdCounter++).toString();
           _eventStore[eventId] = EventMessage(
-            message: message as Map<String, dynamic>,
+            message: Map<String, dynamic>.from(message),
             eventId: eventId,
           );
-          _sendSseEvent(_getStream!.controller, message, eventId: eventId);
+          _sendSseEvent(_getStream!.controller, Map<String, dynamic>.from(message), eventId: eventId);
         }
       }
     } catch (e, stackTrace) {
@@ -706,6 +927,9 @@ class StreamableHttpServerTransport implements ServerTransport {
     _isClosed = true;
     
     _logger.info('Closing StreamableHTTP server transport');
+    
+    // Cancel cleanup timer
+    _cleanupTimer?.cancel();
     
     // Close all SSE streams
     for (final stream in _sseStreams.values) {
@@ -728,6 +952,14 @@ class StreamableHttpServerTransport implements ServerTransport {
       }
     }
     _pendingRequests.clear();
+    
+    // Complete any pending completers with error
+    for (final completer in _pendingCompleters.values) {
+      if (!completer.isCompleted) {
+        completer.completeError('Server shutting down');
+      }
+    }
+    _pendingCompleters.clear();
     
     // Close message routers
     for (final router in _messageRouters.values) {

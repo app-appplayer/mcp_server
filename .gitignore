@@ -9,4 +9,7 @@ pubspec.lock
 # Log files
 *.log
 
+# Compiled executables
+example/mcp_server_example
+
 .claude

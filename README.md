@@ -192,11 +192,65 @@ void main() {
     },
   );
 
-  // Connect to transport
+  // Connect to transport - old way (still supported)
   final transportResult = McpServer.createStdioTransport();
   final transport = transportResult.get();
   server.connect(transport);
 }
+
+// NEW: Simplified unified API (recommended)
+void simplifiedMain() async {
+  final serverResult = await McpServer.createAndStart(
+    config: McpServer.simpleConfig(
+      name: 'Example Server',
+      version: '1.0.0',
+    ),
+    transportConfig: TransportConfig.stdio(),
+  );
+
+  await serverResult.fold(
+    (server) async {
+      // Add tools, resources, prompts as shown above
+      
+      // Server is already running
+      await Future.delayed(const Duration(hours: 24));
+    },
+    (error) => print('Server failed: $error'),
+  );
+}
+```
+
+### Transport Configuration
+
+The MCP Server now supports unified transport configuration:
+
+```dart
+// STDIO Transport
+TransportConfig.stdio()
+
+// SSE Transport  
+TransportConfig.sse(
+  host: 'localhost',
+  port: 8080,
+  endpoint: '/sse',
+  authToken: 'optional-token',
+)
+
+// Streamable HTTP Transport - SSE Streaming Mode (default)
+TransportConfig.streamableHttp(
+  host: 'localhost', 
+  port: 8081,
+  endpoint: '/mcp',
+  isJsonResponseEnabled: false, // SSE streaming mode (default)
+)
+
+// Streamable HTTP Transport - JSON Response Mode
+TransportConfig.streamableHttp(
+  host: 'localhost', 
+  port: 8081,
+  endpoint: '/mcp',
+  isJsonResponseEnabled: true, // JSON response mode
+)
 ```
 
 ## Core Concepts
@@ -506,6 +560,51 @@ final transportResult = McpServer.createSseTransport(sseConfig);
 final transport = transportResult.get();
 server.connect(transport);
 ```
+
+### Streamable HTTP Transport
+
+The Streamable HTTP transport supports two response modes:
+
+#### SSE Streaming Mode (Default)
+For real-time streaming of responses:
+
+```dart
+final serverResult = await McpServer.createAndStart(
+  config: McpServer.simpleConfig(
+    name: 'My Server',
+    version: '1.0.0',
+  ),
+  transportConfig: TransportConfig.streamableHttp(
+    host: 'localhost',
+    port: 8081,
+    endpoint: '/mcp',
+    isJsonResponseEnabled: false, // SSE streaming mode
+  ),
+);
+```
+
+#### JSON Response Mode
+For single JSON responses (simpler but no streaming):
+
+```dart
+final serverResult = await McpServer.createAndStart(
+  config: McpServer.simpleConfig(
+    name: 'My Server',
+    version: '1.0.0',
+  ),
+  transportConfig: TransportConfig.streamableHttp(
+    host: 'localhost',
+    port: 8081,
+    endpoint: '/mcp',
+    isJsonResponseEnabled: true, // JSON response mode
+  ),
+);
+```
+
+**Important Notes:**
+- The response mode is fixed at server startup and cannot be changed dynamically
+- Clients must include both `application/json` and `text/event-stream` in their Accept headers regardless of the server's mode
+- SSE mode allows streaming multiple responses, while JSON mode returns a single response
 
 ## Logging
 

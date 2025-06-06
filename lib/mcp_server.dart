@@ -106,9 +106,45 @@ class McpServerConfig {
       'enableMetrics: $enableMetrics)';
 }
 
-/// Configuration for SSE transport
+/// Configuration for transport connections
 @immutable
-class SseServerConfig {
+sealed class TransportConfig {
+  const TransportConfig();
+
+  /// Configuration for STDIO transport
+  const factory TransportConfig.stdio() = StdioTransportConfig;
+
+  /// Configuration for SSE transport
+  const factory TransportConfig.sse({
+    String endpoint,
+    String messagesEndpoint,
+    String host,
+    int port,
+    List<int> fallbackPorts,
+    String? authToken,
+    List<shelf.Middleware> middleware,
+  }) = SseTransportConfig;
+
+  /// Configuration for Streamable HTTP transport
+  const factory TransportConfig.streamableHttp({
+    String host,
+    int port,
+    String endpoint,
+    String messagesEndpoint,
+    List<int> fallbackPorts,
+    String? authToken,
+    bool isJsonResponseEnabled,
+    List<shelf.Middleware> middleware,
+  }) = StreamableHttpTransportConfig;
+}
+
+@immutable
+final class StdioTransportConfig extends TransportConfig {
+  const StdioTransportConfig();
+}
+
+@immutable
+final class SseTransportConfig extends TransportConfig {
   /// The endpoint path for SSE connections
   final String endpoint;
 
@@ -127,74 +163,62 @@ class SseServerConfig {
   /// Authentication token for secure connections
   final String? authToken;
 
-
   /// Custom middleware to apply
   final List<shelf.Middleware> middleware;
 
-  const SseServerConfig({
+  const SseTransportConfig({
     this.endpoint = '/sse',
-    this.messagesEndpoint = '/messages',
+    this.messagesEndpoint = '/message',
     this.host = 'localhost',
     this.port = 8080,
     this.fallbackPorts = const [],
     this.authToken,
     this.middleware = const [],
   });
-
-  /// Creates a copy of this config with the given fields replaced
-  SseServerConfig copyWith({
-    String? endpoint,
-    String? messagesEndpoint,
-    String? host,
-    int? port,
-    List<int>? fallbackPorts,
-    String? authToken,
-    List<shelf.Middleware>? middleware,
-  }) {
-    return SseServerConfig(
-      endpoint: endpoint ?? this.endpoint,
-      messagesEndpoint: messagesEndpoint ?? this.messagesEndpoint,
-      host: host ?? this.host,
-      port: port ?? this.port,
-      fallbackPorts: fallbackPorts ?? this.fallbackPorts,
-      authToken: authToken ?? this.authToken,
-      middleware: middleware ?? this.middleware,
-    );
-  }
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is SseServerConfig &&
-      endpoint == other.endpoint &&
-      messagesEndpoint == other.messagesEndpoint &&
-      host == other.host &&
-      port == other.port &&
-      _listEquals(fallbackPorts, other.fallbackPorts) &&
-      authToken == other.authToken &&
-      _listEquals(middleware, other.middleware);
-
-  @override
-  int get hashCode => Object.hash(
-    endpoint,
-    messagesEndpoint,
-    host,
-    port,
-    fallbackPorts,
-    authToken,
-    middleware,
-  );
-
-  @override
-  String toString() => 'SseServerConfig('
-      'endpoint: $endpoint, '
-      'messagesEndpoint: $messagesEndpoint, '
-      'host: $host, '
-      'port: $port, '
-      'fallbackPorts: $fallbackPorts, '
-      'authToken: ${authToken != null ? '[REDACTED]' : 'null'}, '
-      'middleware: ${middleware.length} items)';
 }
+
+@immutable
+final class StreamableHttpTransportConfig extends TransportConfig {
+  /// The host to bind to
+  final String host;
+
+  /// The port to listen on
+  final int port;
+
+  /// The endpoint path for HTTP connections
+  final String endpoint;
+
+  /// The endpoint path for message sending
+  final String messagesEndpoint;
+
+  /// Fallback ports to try if the primary port is unavailable
+  final List<int> fallbackPorts;
+
+  /// Authentication token for secure connections
+  final String? authToken;
+
+  /// Whether to enable JSON response mode instead of SSE streaming
+  final bool isJsonResponseEnabled;
+
+  /// Custom middleware to apply
+  final List<shelf.Middleware> middleware;
+
+  const StreamableHttpTransportConfig({
+    this.host = 'localhost',
+    this.port = 8080,
+    this.endpoint = '/messages',
+    this.messagesEndpoint = '/message',
+    this.fallbackPorts = const [],
+    this.authToken,
+    this.isJsonResponseEnabled = false,
+    this.middleware = const [],
+  });
+}
+
+// Keep SseServerConfig for backward compatibility
+@Deprecated('Use SseTransportConfig instead')
+typedef SseServerConfig = SseTransportConfig;
+
 
 typedef MCPServer = McpServer;
 
@@ -216,26 +240,124 @@ class McpServer {
     );
   }
 
-  /// Create and start a server with the given configuration and transport
-  static Future<Result<Server, Exception>> createAndStart({
-    required McpServerConfig config,
-    required ServerTransport transport,
-  }) async {
-    return Results.catchingAsync(() async {
-      final server = createServer(config);
-      server.connect(transport);
-      return server;
-    });
-  }
-
   /// Create a stdio transport
   static Result<StdioServerTransport, Exception> createStdioTransport() {
     return Results.catching(() => StdioServerTransport());
   }
 
+  /// Create and start a server using the provided configuration and transport
+  static Future<Result<Server, Exception>> createAndStart({
+    required McpServerConfig config,
+    required TransportConfig transportConfig,
+  }) async {
+    return Results.catchingAsync(() async {
+      final server = createServer(config);
+      final transport = await _createTransport(transportConfig);
+      server.connect(transport);
+      return server;
+    });
+  }
+
+  /// Create a transport from the given configuration
+  static Future<ServerTransport> _createTransport(TransportConfig config) {
+    return switch (config) {
+      StdioTransportConfig() => Future.value(StdioServerTransport()),
+      SseTransportConfig(
+        endpoint: final endpoint,
+        messagesEndpoint: final messagesEndpoint,
+        host: final host,
+        port: final port,
+        fallbackPorts: final fallbackPorts,
+        authToken: final authToken,
+      ) =>
+        Future.value(SseServerTransport(
+          endpoint: endpoint,
+          messagesEndpoint: messagesEndpoint,
+          host: host,
+          port: port,
+          fallbackPorts: fallbackPorts,
+          authToken: authToken,
+        )),
+      StreamableHttpTransportConfig(
+        host: final host,
+        port: final port,
+        endpoint: final endpoint,
+        messagesEndpoint: final _,
+        fallbackPorts: final fallbackPorts,
+        authToken: final _,
+        isJsonResponseEnabled: final isJsonResponseEnabled,
+      ) =>
+        () async {
+          final transport = StreamableHttpServerTransport(
+            config: StreamableHttpServerConfig(
+              host: host,
+              port: port,
+              endpoint: endpoint,
+              fallbackPorts: fallbackPorts,
+              isJsonResponseEnabled: isJsonResponseEnabled,
+            ),
+          );
+          await transport.start();
+          return transport;
+        }(),
+    };
+  }
+
+  /// Create a transport using unified configuration (Result-based)
+  static Result<Future<ServerTransport>, Exception> createTransport(
+    TransportConfig config,
+  ) {
+    return Results.catching(() => _createTransport(config));
+  }
+
+  /// Helper method to create a simple server configuration
+  static McpServerConfig simpleConfig({
+    required String name,
+    required String version,
+    bool enableDebugLogging = false,
+  }) {
+    return McpServerConfig(
+      name: name,
+      version: version,
+      capabilities: ServerCapabilities.simple(
+        tools: true,
+        resources: true,
+        prompts: true,
+      ),
+      enableDebugLogging: enableDebugLogging,
+    );
+  }
+
+  /// Helper method to create a production-ready server configuration
+  static McpServerConfig productionConfig({
+    required String name,
+    required String version,
+    ServerCapabilities? capabilities,
+  }) {
+    return McpServerConfig(
+      name: name,
+      version: version,
+      capabilities: capabilities ?? ServerCapabilities.simple(
+        tools: true,
+        toolsListChanged: true,
+        resources: true,
+        resourcesListChanged: true,
+        prompts: true,
+        promptsListChanged: true,
+        logging: true,
+        progress: true,
+      ),
+      enableDebugLogging: false,
+      maxConnections: 1000,
+      requestTimeout: const Duration(seconds: 60),
+      enableMetrics: true,
+    );
+  }
+
   /// Create an SSE transport with the given configuration
+  @Deprecated('Use createTransport(TransportConfig.sse(...)) instead')
   static Result<SseServerTransport, Exception> createSseTransport(
-    SseServerConfig config,
+    SseTransportConfig config,
   ) {
     return Results.catching(() => SseServerTransport(
       endpoint: config.endpoint,
@@ -300,69 +422,4 @@ class McpServer {
     });
   }
 
-  /// Helper method to create a simple server configuration
-  static McpServerConfig simpleConfig({
-    required String name,
-    required String version,
-    bool enableDebugLogging = false,
-  }) {
-    return McpServerConfig(
-      name: name,
-      version: version,
-      enableDebugLogging: enableDebugLogging,
-    );
-  }
-
-  /// Helper method to create a production-ready server configuration
-  static McpServerConfig productionConfig({
-    required String name,
-    required String version,
-    ServerCapabilities? capabilities,
-  }) {
-    return McpServerConfig(
-      name: name,
-      version: version,
-      capabilities: capabilities ?? const ServerCapabilities(),
-      enableDebugLogging: false,
-      maxConnections: 1000,
-      requestTimeout: const Duration(seconds: 60),
-      enableMetrics: true,
-    );
-  }
-
-  /// Helper method to create a simple SSE server configuration
-  static SseServerConfig simpleSseConfig({
-    int port = 8080,
-    String? authToken,
-  }) {
-    return SseServerConfig(
-      port: port,
-      authToken: authToken,
-    );
-  }
-
-  /// Helper method to create a production-ready SSE server configuration
-  static SseServerConfig productionSseConfig({
-    int port = 8080,
-    List<int> fallbackPorts = const [8081, 8082, 8083],
-    required String authToken,
-  }) {
-    return SseServerConfig(
-      port: port,
-      fallbackPorts: fallbackPorts,
-      authToken: authToken,
-      middleware: [
-        shelf.logRequests(),
-      ],
-    );
-  }
-}
-
-/// Helper function to compare lists for equality
-bool _listEquals<T>(List<T> a, List<T> b) {
-  if (a.length != b.length) return false;
-  for (int i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
-  }
-  return true;
 }
