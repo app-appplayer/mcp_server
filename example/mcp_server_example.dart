@@ -20,68 +20,59 @@ void main(List<String> args) async {
 
 Future<void> startMcpServer({required String mode, int port = 8080}) async {
   try {
-    // Create server with capabilities
-    final server = Server(
-      name: 'Flutter MCP Demo',
-      version: '1.0.0',
-      capabilities: ServerCapabilities.simple(
-        tools: true,
-        toolsListChanged: true,
-        resources: true,
-        resourcesListChanged: true,
-        prompts: true,
-        promptsListChanged: true,
+    // Create and start server with unified API
+    final serverResult = await McpServer.createAndStart(
+      config: McpServer.simpleConfig(
+        name: 'Flutter MCP Demo',
+        version: '1.0.0',
+        enableDebugLogging: true,
       ),
+      transportConfig: mode == 'stdio'
+          ? TransportConfig.stdio()
+          : TransportConfig.sse(
+              endpoint: '/sse',
+              messagesEndpoint: '/message',
+              host: 'localhost',
+              port: port,
+            ),
     );
 
-    // Register tools, resources, and prompts
-    _registerTools(server);
-    _registerResources(server);
-    _registerPrompts(server);
+    await serverResult.fold(
+      (server) async {
+        // Register tools, resources, and prompts
+        _registerTools(server);
+        _registerResources(server);
+        _registerPrompts(server);
 
-    // Create transport based on mode
-    ServerTransport transport;
-    if (mode == 'stdio') {
-      _logger.debug('Starting server in STDIO mode');
-      final result = McpServer.createStdioTransport();
-      transport = result.get(); // This will throw if failed
-    } else {
-      _logger.debug('Starting server in SSE mode on port $port');
-      final result = McpServer.createSseTransport(
-        SseServerConfig(
-          endpoint: '/sse',
-          messagesEndpoint: '/message',
-          host: 'localhost',
-          port: port,
-        ),
-      );
-      transport = result.get(); // This will throw if failed
-    }
+        // Set up transport closure handling
+        server.onDisconnect.listen((_) {
+          _logger.debug('Client disconnected, shutting down.');
+          exit(0);
+        });
 
-    // Set up transport closure handling
-    transport.onClose.then((_) {
-      _logger.debug('Transport closed, shutting down.');
-      exit(0);
-    });
+        // Send initial log message
+        server.sendLog(McpLogLevel.info, 'Flutter MCP Server started successfully');
 
-    // Connect server to transport
-    server.connect(transport);
+        if (mode == 'sse') {
+          _logger.debug('SSE Server is running on:');
+          _logger.debug('- SSE endpoint:     http://localhost:$port/sse');
+          _logger.debug('- Message endpoint: http://localhost:$port/message');
+          _logger.debug('Press Ctrl+C to stop the server');
+        } else {
+          _logger.debug('STDIO Server initialized and connected to transport');
+        }
 
-    // Send initial log message
-    server.sendLog(McpLogLevel.info, 'Flutter MCP Server started successfully');
-
-    if (mode == 'sse') {
-      _logger.debug('SSE Server is running on:');
-      _logger.debug('- SSE endpoint:     http://localhost:$port/sse');
-      _logger.debug('- Message endpoint: http://localhost:$port/message');
-      _logger.debug('Press Ctrl+C to stop the server');
-    } else {
-      _logger.debug('STDIO Server initialized and connected to transport');
-    }
-
+        // Keep server running
+        await Future.delayed(const Duration(hours: 24)); // Run for 24 hours
+      },
+      (error) {
+        _logger.debug('Error initializing MCP server: $error');
+        exit(1);
+      },
+    );
   } catch (e, stackTrace) {
     _logger.debug('Error initializing MCP server: $e');
-    _logger.debug(stackTrace as String);
+    _logger.debug(stackTrace.toString());
     exit(1);
   }
 }

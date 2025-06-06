@@ -781,6 +781,9 @@ class ClientSession {
   Map<String, Map<String, dynamic>>? pendingAuthCodes;
   Map<String, Map<String, dynamic>>? accessTokens;
   AuthContext? authContext;
+  
+  // Logging support
+  String? logLevel;
 
   ClientSession({
     required this.id,

@@ -216,7 +216,18 @@ class Server implements ServerInterface {
 
   /// Create a new client session
   String _createSession(ServerTransport transport) {
-    final sessionId = Uuid().v4();
+    String sessionId;
+    
+    // Check if transport already has a session ID (e.g., StreamableHTTP)
+    if (transport is StreamableHttpServerTransport) {
+      // Use the transport's existing session ID
+      sessionId = transport.sessionId;
+      _logger.debug('Using existing session ID from StreamableHTTP transport: $sessionId');
+    } else {
+      // Generate a new session ID for other transports
+      sessionId = Uuid().v4();
+      _logger.debug('Generated new session ID: $sessionId');
+    }
 
     final session = ClientSession(
       id: sessionId,
@@ -369,6 +380,11 @@ class Server implements ServerInterface {
   }) {
     if (_resources.containsKey(uri)) {
       throw McpError('Resource with URI "$uri" already exists');
+    }
+
+    // Auto-detect template URIs (containing {param} placeholders)
+    if (uriTemplate == null && uri.contains('{') && uri.contains('}')) {
+      uriTemplate = {'isTemplate': true};
     }
 
     final resource = Resource(
@@ -1064,6 +1080,15 @@ class Server implements ServerInterface {
         await _handleOAuthRevoke(sessionId, request);
         break;
 
+      // Standard MCP methods
+      case 'logging/setLevel':
+        await _handleLoggingSetLevel(sessionId, request);
+        break;
+
+      case 'ping':
+        await _handlePing(sessionId, request);
+        break;
+
       default:
         _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Method not found');
     }
@@ -1092,6 +1117,7 @@ class Server implements ServerInterface {
     final session = _sessions[sessionId];
     if (session != null) {
       session.negotiatedProtocolVersion = negotiatedVersion;
+      session.isInitialized = true; // Mark session as initialized
 
       // Store client capabilities
       if (request.params?['capabilities'] != null) {
@@ -1569,7 +1595,7 @@ class Server implements ServerInterface {
 
   /// Send a JSON-RPC response to specific session
   void _sendResponse(String sessionId, dynamic id, dynamic result, {String? batchId}) {
-    _logger.debug('🚀 _sendResponse called - sessionId: $sessionId, id: $id');
+    _logger.debug('🚀 _sendResponse called - sessionId: $sessionId, id: $id (type: ${id.runtimeType})');
     
     final session = _sessions[sessionId];
     if (session == null) {
@@ -1595,7 +1621,7 @@ class Server implements ServerInterface {
       }
     }
 
-    _logger.debug('📤 Calling transport.send() with response...');
+    _logger.debug('📤 Calling transport.send() with response: ${jsonEncode(response)}');
     session.transport.send(response);
     _logger.debug('✅ transport.send() completed');
   }
@@ -2469,6 +2495,63 @@ extension OAuthServerMethods on Server {
     // In production, this would check against a secure client registry
     // For demo purposes, accept any non-empty credentials
     return clientId.isNotEmpty && clientSecret.isNotEmpty;
+  }
+
+  /// Handle logging/setLevel request
+  Future<void> _handleLoggingSetLevel(String sessionId, JsonRpcMessage request) async {
+    // Validate capabilities
+    if (capabilities.logging == null) {
+      _sendErrorResponse(
+        sessionId,
+        request.id,
+        ErrorCode.methodNotFound,
+        'Logging capability not supported',
+      );
+      return;
+    }
+
+    // Get the requested log level
+    final level = request.params?['level'] as String?;
+    if (level == null) {
+      _sendErrorResponse(
+        sessionId,
+        request.id,
+        ErrorCode.invalidParams,
+        'level parameter is required',
+      );
+      return;
+    }
+
+    // Validate log level
+    final validLevels = ['debug', 'info', 'warning', 'error'];
+    if (!validLevels.contains(level.toLowerCase())) {
+      _sendErrorResponse(
+        sessionId,
+        request.id,
+        ErrorCode.invalidParams,
+        'Invalid log level. Valid levels are: ${validLevels.join(", ")}',
+      );
+      return;
+    }
+
+    // Update log level for the session
+    final session = _sessions[sessionId];
+    if (session != null) {
+      session.logLevel = level.toLowerCase();
+      _logger.info('Log level set to $level for session $sessionId');
+    }
+
+    // Send success response
+    _sendResponse(sessionId, request.id, {});
+  }
+
+  /// Handle ping request
+  Future<void> _handlePing(String sessionId, JsonRpcMessage request) async {
+    // Simple ping/pong implementation for keepalive
+    _sendResponse(sessionId, request.id, {
+      'pong': true,
+      'timestamp': DateTime.now().toIso8601String(),
+    });
   }
 
 }
