@@ -499,7 +499,7 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 50));
 
       // Update resource to trigger notification
-      server.notifyResourceUpdated('test://resource', ResourceContent(
+      server.notifyResourceUpdated('test://resource', content: ResourceContent(
         uri: 'test://resource',
         text: 'Updated content',
         mimeType: 'text/plain',

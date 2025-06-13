@@ -1,3 +1,10 @@
+## 1.0.1 - 2025-03-26
+
+### Bug Fixes
+- Fixed resource update notification format mismatch with client expectations
+- Made resource content optional in notifications for MCP 2025-03-26 compliance
+- Enhanced `notifyResourceUpdated` method to support both standard (URI-only) and extended (with content) notification formats
+
 ## 1.0.0 - 2025-03-26
 
 ### 🎉 Major Release - MCP Protocol v2025-03-26

@@ -50,7 +50,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_server: ^1.0.0
+  mcp_server: ^1.0.1
 ```
 
 Or install via command line:

@@ -1,6 +1,6 @@
 name: mcp_server
 description: Dart implementation of Model Context Protocol (MCP) server v2025-03-26. Supports embedded systems, modern async patterns, and full MCP standard compliance for LLM applications.
-version: 1.0.0
+version: 1.0.1
 homepage: https://github.com/app-appplayer/mcp_server
 repository: https://github.com/app-appplayer/mcp_server
 issue_tracker: https://github.com/app-appplayer/mcp_server/issues

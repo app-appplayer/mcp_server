@@ -558,7 +558,11 @@ class Server implements ServerInterface {
   }
 
   /// Notify clients about a resource update
-  void notifyResourceUpdated(String uri, ResourceContent content) {
+  /// 
+  /// [uri] The URI of the updated resource
+  /// [content] Optional resource content. If provided, sends ResourceContentInfo format.
+  ///           If omitted, sends only URI (MCP 2025-03-26 standard compliant).
+  void notifyResourceUpdated(String uri, {ResourceContent? content}) {
     // Invalidate cache
     _resourceCache.remove(uri);
 
@@ -567,10 +571,25 @@ class Server implements ServerInterface {
     final subscribers = _resourceSubscriptions[uri];
     if (subscribers == null || subscribers.isEmpty) return;
 
-    final notification = {
-      'uri': uri,
-      'content': content.toJson(),
-    };
+    // Build notification based on whether content is provided
+    final Map<String, dynamic> notification;
+    if (content != null) {
+      // Extended format with ResourceContentInfo structure
+      notification = {
+        'uri': uri,
+        'content': {
+          'uri': uri,
+          'text': content.text,
+          'blob': content.blob,
+          'mimeType': content.mimeType,
+        },
+      };
+    } else {
+      // Standard MCP 2025-03-26 format (URI only)
+      notification = {
+        'uri': uri,
+      };
+    }
 
     for (final sessionId in subscribers) {
       if (_sessions.containsKey(sessionId)) {
