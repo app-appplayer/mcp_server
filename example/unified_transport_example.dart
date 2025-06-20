@@ -125,6 +125,7 @@ Future<void> exampleStreamableHttpSseServer(Logger logger) async {
       endpoint: '/mcp',
       isJsonResponseEnabled: false, // SSE streaming mode (default)
       fallbackPorts: [8082, 8083],
+      authToken: 'secure-bearer-token-123', // Optional Bearer token authentication
     ),
   );
 
@@ -132,7 +133,9 @@ Future<void> exampleStreamableHttpSseServer(Logger logger) async {
     (server) async {
       logger.info('StreamableHTTP server started on http://localhost:8081/mcp');
       logger.info('Response mode: SSE streaming');
+      logger.info('Authentication: Bearer token required');
       logger.info('Note: Clients must accept both application/json and text/event-stream');
+      logger.info('Usage: curl -H "Authorization: Bearer secure-bearer-token-123" http://localhost:8081/mcp');
       
       _addExampleTools(server);
       _addExampleResources(server);
@@ -168,6 +171,7 @@ Future<void> exampleStreamableHttpJsonServer(Logger logger) async {
       endpoint: '/mcp',
       isJsonResponseEnabled: true, // JSON response mode
       fallbackPorts: [8085, 8086],
+      authToken: 'another-secure-token-456', // Optional Bearer token authentication
     ),
   );
 
@@ -175,7 +179,9 @@ Future<void> exampleStreamableHttpJsonServer(Logger logger) async {
     (server) async {
       logger.info('StreamableHTTP server started on http://localhost:8084/mcp');
       logger.info('Response mode: JSON (single response)');
+      logger.info('Authentication: Bearer token required');
       logger.info('Note: Clients must still accept both application/json and text/event-stream');
+      logger.info('Usage: curl -H "Authorization: Bearer another-secure-token-456" http://localhost:8084/mcp');
       
       _addExampleTools(server);
       _addExampleResources(server);

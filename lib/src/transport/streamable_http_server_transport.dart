@@ -56,6 +56,9 @@ class StreamableHttpServerConfig {
   /// - async: 202 Accepted with polling mechanism
   final String jsonResponseMode;
   
+  /// Authentication token for Bearer token validation (optional)
+  final String? authToken;
+  
   const StreamableHttpServerConfig({
     this.endpoint = '/mcp',
     this.host = 'localhost',
@@ -66,6 +69,7 @@ class StreamableHttpServerConfig {
     this.requestTimeout = const Duration(seconds: 30),
     this.isJsonResponseEnabled = false, // StreamableHTTP uses SSE by default
     this.jsonResponseMode = 'sync', // Default to synchronous JSON responses
+    this.authToken, // Optional Bearer token for authentication
   });
 }
 
@@ -312,6 +316,11 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   /// Handle POST request (main JSON-RPC endpoint)
   Future<void> _handlePostRequest(HttpRequest request) async {
+    // Validate Bearer token first (if configured)
+    if (!_validateBearerToken(request)) {
+      return;
+    }
+    
     // Validate headers according to MCP StreamableHTTP specification
     if (!_validateAcceptHeaders(request)) {
       _sendErrorResponse(
@@ -592,6 +601,11 @@ class StreamableHttpServerTransport implements ServerTransport {
     _logger.debug('Handling GET request');
     _logger.debug('Headers: ${request.headers}');
     
+    // Validate Bearer token first (if configured)
+    if (!_validateBearerToken(request)) {
+      return;
+    }
+    
     // Validate Accept header - more lenient for GET requests
     final acceptHeader = request.headers.value('accept');
     _logger.debug('Accept header: $acceptHeader');
@@ -675,6 +689,11 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   /// Handle DELETE request (terminate session)
   Future<void> _handleDeleteRequest(HttpRequest request) async {
+    // Validate Bearer token first (if configured)
+    if (!_validateBearerToken(request)) {
+      return;
+    }
+    
     if (!await _validateSession(request)) {
       return;
     }
@@ -720,6 +739,28 @@ class StreamableHttpServerTransport implements ServerTransport {
   bool _validateContentType(HttpRequest request) {
     final contentType = request.headers.value('content-type') ?? '';
     return contentType.startsWith(contentTypeJson);
+  }
+  
+  /// Validate Bearer token (consistent with SSE transport)
+  bool _validateBearerToken(HttpRequest request) {
+    // Skip validation if no auth token is configured
+    if (config.authToken == null) {
+      return true;
+    }
+    
+    final authHeader = request.headers.value('Authorization');
+    if (authHeader == null || authHeader != 'Bearer ${config.authToken}') {
+      _logger.debug('Bearer token validation failed - expected: Bearer ${config.authToken}, got: $authHeader');
+      _sendErrorResponse(
+        request.response,
+        'Unauthorized: Invalid or missing Bearer token',
+        HttpStatus.unauthorized,
+      );
+      return false;
+    }
+    
+    _logger.debug('Bearer token validation passed');
+    return true;
   }
   
   /// Validate session

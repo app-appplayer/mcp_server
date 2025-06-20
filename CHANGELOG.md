@@ -1,3 +1,27 @@
+## 1.0.2 - 2025-06-20
+
+### 🔒 Security Enhancements
+- **CRITICAL**: Fixed StreamableHTTP transport authentication vulnerability
+- Added Bearer token validation to StreamableHTTP transport (consistent with SSE)
+- Implemented comprehensive authentication for all HTTP methods (POST, GET, DELETE)
+- Enhanced factory methods to support `authToken` parameter
+- Added authentication compliance tests for MCP security standards
+
+### Features
+- Added `authToken` parameter to `StreamableHttpServerConfig`
+- Enhanced unified API with `authToken` support in `TransportConfig.streamableHttp()`
+- Improved error messages for authentication failures
+- Added comprehensive authentication test suite
+
+### Bug Fixes
+- Fixed MCP standard compliance issue where StreamableHTTP lacked authentication
+- Resolved security inconsistency between SSE and StreamableHTTP transports
+
+### Tests
+- Added `streamable_http_authentication_test.dart` with comprehensive auth coverage
+- Consolidated and cleaned up duplicate test files
+- Enhanced test documentation in `test/README.md`
+
 ## 1.0.1 - 2025-03-26
 
 ### Bug Fixes

@@ -284,7 +284,7 @@ class McpServer {
         endpoint: final endpoint,
         messagesEndpoint: final _,
         fallbackPorts: final fallbackPorts,
-        authToken: final _,
+        authToken: final authToken,
         isJsonResponseEnabled: final isJsonResponseEnabled,
       ) =>
         () async {
@@ -295,6 +295,7 @@ class McpServer {
               endpoint: endpoint,
               fallbackPorts: fallbackPorts,
               isJsonResponseEnabled: isJsonResponseEnabled,
+              authToken: authToken,
             ),
           );
           await transport.start();
@@ -378,6 +379,7 @@ class McpServer {
     List<int>? fallbackPorts,
     bool isJsonResponseEnabled = false,
     String? sessionId,
+    String? authToken,
   }) async {
     try {
       final transport = StreamableHttpServerTransport(
@@ -387,6 +389,7 @@ class McpServer {
           host: host,
           fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
           isJsonResponseEnabled: isJsonResponseEnabled,
+          authToken: authToken,
         ),
         sessionId: sessionId,
       );
@@ -406,6 +409,7 @@ class McpServer {
     List<int>? fallbackPorts,
     bool isJsonResponseEnabled = false,
     String? sessionId,
+    String? authToken,
   }) {
     return Results.catching(() {
       final transport = StreamableHttpServerTransport(
@@ -415,6 +419,7 @@ class McpServer {
           host: host,
           fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
           isJsonResponseEnabled: isJsonResponseEnabled,
+          authToken: authToken,
         ),
         sessionId: sessionId,
       );
