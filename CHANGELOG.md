@@ -22,7 +22,7 @@
 - Consolidated and cleaned up duplicate test files
 - Enhanced test documentation in `test/README.md`
 
-## 1.0.1 - 2025-03-26
+## 1.0.1 
 
 ### Bug Fixes
 - Fixed resource update notification format mismatch with client expectations
