@@ -1,4 +1,4 @@
-## 1.0.2 - 2025-06-20
+## 1.0.2 
 
 ### 🔒 Security Enhancements
 - **CRITICAL**: Fixed StreamableHTTP transport authentication vulnerability
