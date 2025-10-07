@@ -58,7 +58,11 @@ class StreamableHttpServerConfig {
   
   /// Authentication token for Bearer token validation (optional)
   final String? authToken;
-  
+
+  /// Enable GET stream for out-of-band server-initiated messages (per MCP 2025-03-26)
+  /// When false, server returns 405 Method Not Allowed for GET requests
+  final bool enableGetStream;
+
   const StreamableHttpServerConfig({
     this.endpoint = '/mcp',
     this.host = 'localhost',
@@ -70,6 +74,7 @@ class StreamableHttpServerConfig {
     this.isJsonResponseEnabled = false, // StreamableHTTP uses SSE by default
     this.jsonResponseMode = 'sync', // Default to synchronous JSON responses
     this.authToken, // Optional Bearer token for authentication
+    this.enableGetStream = true, // Default: enabled per MCP 2025-03-26
   });
 }
 
@@ -118,16 +123,11 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   HttpServer? _server;
   bool _isClosed = false;
-  
-  // Session management
-  String _sessionId;
-  bool _terminated = false;
-  
-  /// Get the session ID for this transport
-  String get sessionId => _sessionId;
-  
-  // Initialize flag to track first message
-  bool _isFirstMessage = true;
+
+  // Session management - support multiple concurrent sessions
+  final Map<String, StreamController<dynamic>> _sessionMessageControllers = {};
+  final Set<String> _activeSessions = {};
+  final Set<String> _terminatedSessions = {};
   
   // Request tracking for JSON responses
   final Map<dynamic, _PendingRequest> _pendingRequests = {};
@@ -144,9 +144,9 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   // Message router for proper request/response matching
   final Map<dynamic, StreamController<dynamic>> _messageRouters = {};
-  
-  // GET stream for server-initiated messages (standalone SSE stream)
-  SseStreamInfo? _getStream;
+
+  // GET streams per session for server-initiated messages (standalone SSE stream)
+  final Map<String, SseStreamInfo> _getStreams = {};
   
   // Queue for responses waiting for GET stream in JSON mode
   final List<EventMessage> _pendingResponseQueue = [];
@@ -162,18 +162,68 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   StreamableHttpServerTransport({
     required this.config,
+    @Deprecated('sessionId parameter is ignored. StreamableHTTP now manages multiple sessions internally.')
     String? sessionId,
-  }) : _sessionId = sessionId ?? _generateSessionId() {
+  }) {
+    // Note: sessionId parameter is ignored for backward compatibility
+    // StreamableHTTP now supports multiple concurrent sessions
+
     // Start cleanup timer for async mode
     if (config.isJsonResponseEnabled && config.jsonResponseMode == 'async') {
       _cleanupTimer = Timer.periodic(Duration(minutes: 1), (_) => _cleanupOldResponses());
     }
   }
-  
+
+  /// Get session ID - deprecated
+  /// Returns empty string as this transport now manages multiple sessions
+  @Deprecated('StreamableHTTP now manages multiple sessions internally. This getter returns empty string.')
+  String get sessionId => '';
+
   static String _generateSessionId() {
     return const Uuid().v4();
   }
-  
+
+  /// Extract or generate session ID from request
+  String _getOrCreateSessionId(HttpRequest request) {
+    var sessionId = request.headers.value(mcpSessionIdHeader);
+
+    // Validate session ID from client
+    if (sessionId != null && sessionId.isNotEmpty) {
+      // Check if session is active (session reconnection)
+      if (_activeSessions.contains(sessionId)) {
+        _logger.debug('Session reconnected: $sessionId');
+        return sessionId;
+      } else {
+        // Session ID from client is not valid (server may have restarted)
+        // Generate new session ID and log the event
+        _logger.info('⚠️  Invalid session ID from client: $sessionId (server restarted or session expired)');
+        _logger.info('🔄 Generating new session ID for client');
+        sessionId = _generateSessionId();
+      }
+    } else {
+      // No session ID from client - first connection
+      sessionId = _generateSessionId();
+      _logger.debug('Generated new session ID: $sessionId');
+    }
+
+    // Track active session
+    _activeSessions.add(sessionId);
+    _logger.debug('New session registered: $sessionId');
+
+    // Notify Server about new session via message controller
+    if (!_messageController.isClosed && !_sessionMessageControllers.containsKey(sessionId)) {
+      final sessionController = StreamController<dynamic>();
+      _sessionMessageControllers[sessionId] = sessionController;
+    }
+
+    return sessionId;
+  }
+
+  /// Check if session is terminated
+  bool _isSessionTerminated(String sessionId) {
+    return _terminatedSessions.contains(sessionId);
+  }
+
   /// Start the HTTP server
   Future<void> start() async {
     _logger.info('Starting StreamableHTTP server...');
@@ -235,15 +285,8 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// Handle incoming HTTP requests according to MCP StreamableHTTP spec
   Future<void> _handleHttpRequest(HttpRequest request) async {
     try {
-      if (_terminated) {
-        _sendErrorResponse(
-          request.response,
-          'Not Found: Session has been terminated',
-          HttpStatus.notFound,
-        );
-        return;
-      }
-      
+      // Session termination is now checked per-session in _validateSession()
+
       // Normalize paths to handle trailing slashes
       final requestPath = request.uri.path.endsWith('/') && request.uri.path.length > 1
           ? request.uri.path.substring(0, request.uri.path.length - 1)
@@ -263,14 +306,15 @@ class StreamableHttpServerTransport implements ServerTransport {
       if (requestPath != configEndpoint) {
         _sendErrorResponse(
           request.response,
+          '',
           'Not Found',
           HttpStatus.notFound,
         );
         return;
       }
-      
+
       _setCorsHeaders(request.response);
-      
+
       switch (request.method) {
         case 'OPTIONS':
           await _handleOptionsRequest(request);
@@ -287,6 +331,7 @@ class StreamableHttpServerTransport implements ServerTransport {
         default:
           _sendErrorResponse(
             request.response,
+            '',
             'Method Not Allowed',
             HttpStatus.methodNotAllowed,
           );
@@ -297,6 +342,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       try {
         _sendErrorResponse(
           request.response,
+          '',
           'Internal Server Error: ${e.toString()}',
           HttpStatus.internalServerError,
         );
@@ -320,27 +366,39 @@ class StreamableHttpServerTransport implements ServerTransport {
     if (!_validateBearerToken(request)) {
       return;
     }
-    
+
+    // Extract or create session ID
+    final sessionId = _getOrCreateSessionId(request);
+
+    // Check if session is terminated
+    if (_isSessionTerminated(sessionId)) {
+      _sendErrorResponse(
+        request.response,
+        sessionId,
+        'Not Found: Session has been terminated',
+        HttpStatus.notFound,
+      );
+      return;
+    }
+
     // Validate headers according to MCP StreamableHTTP specification
     if (!_validateAcceptHeaders(request)) {
       _sendErrorResponse(
         request.response,
+        sessionId,
         'Not Acceptable: Client must accept both application/json and text/event-stream',
         HttpStatus.notAcceptable,
       );
       return;
     }
-    
+
     if (!_validateContentType(request)) {
       _sendErrorResponse(
         request.response,
+        sessionId,
         'Unsupported Media Type: Content-Type must be application/json',
         HttpStatus.unsupportedMediaType,
       );
-      return;
-    }
-    
-    if (!await _validateSession(request)) {
       return;
     }
     
@@ -349,22 +407,24 @@ class StreamableHttpServerTransport implements ServerTransport {
         .bind(request)
         .join()
         .timeout(config.requestTimeout);
-    
+
     if (body.length > config.maxRequestSize) {
       _sendErrorResponse(
         request.response,
+        sessionId,
         'Request Too Large',
         HttpStatus.requestEntityTooLarge,
       );
       return;
     }
-    
+
     Map<String, dynamic> jsonRpcRequest;
     try {
       jsonRpcRequest = jsonDecode(body) as Map<String, dynamic>;
     } catch (e) {
       _sendJsonRpcError(
         request.response,
+        sessionId,
         null,
         -32700,
         'Parse error',
@@ -372,11 +432,12 @@ class StreamableHttpServerTransport implements ServerTransport {
       );
       return;
     }
-    
+
     // Validate JSON-RPC format
     if (!_isValidJsonRpc(jsonRpcRequest)) {
       _sendJsonRpcError(
         request.response,
+        sessionId,
         null,
         -32600,
         'Invalid Request',
@@ -384,73 +445,70 @@ class StreamableHttpServerTransport implements ServerTransport {
       );
       return;
     }
-    
+
+    // Wrap message with session ID metadata for Server
+    final wrappedMessage = {
+      ...jsonRpcRequest,
+      '_sessionId': sessionId,  // Internal metadata for session routing
+    };
+
     // Handle notification (no response expected)
     if (jsonRpcRequest['id'] == null) {
-      // Send to message controller
+      // Send to message controller with session metadata
       if (!_messageController.isClosed) {
-        _messageController.add(jsonRpcRequest);
+        _messageController.add(wrappedMessage);
       }
-      
+
       // Return 202 Accepted for all notifications
       request.response.statusCode = HttpStatus.accepted;
       request.response.headers.set('Content-Type', contentTypeJson);
       request.response.headers.set('Content-Length', '0');
-      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
       await request.response.close();
       return;
     }
-    
+
     // Handle request with ID based on mode
     if (config.isJsonResponseEnabled) {
       // JSON mode
       if (config.jsonResponseMode == 'sync') {
         // Synchronous JSON mode: wait for response and return directly
-        await _handleSyncJsonResponse(request, jsonRpcRequest);
+        await _handleSyncJsonResponse(request, wrappedMessage, sessionId);
       } else {
         // Asynchronous JSON mode: return 202 with polling location
-        await _handleAsyncJsonResponse(request, jsonRpcRequest);
+        await _handleAsyncJsonResponse(request, wrappedMessage, sessionId);
       }
     } else {
       // SSE streaming mode (default for StreamableHTTP)
-      await _handleSseResponse(request, jsonRpcRequest);
+      await _handleSseResponse(request, wrappedMessage, sessionId);
     }
   }
   
   /// Handle synchronous JSON response mode
-  Future<void> _handleSyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
+  Future<void> _handleSyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
-    
-    // Check if this is an initialize request
-    final isInitialize = jsonRpcRequest['method'] == 'initialize';
-    
+
     // Create completer for this request
     final completer = Completer<Map<String, dynamic>>();
     _pendingCompleters[requestId] = completer;
     _logger.debug('Created completer for request ID: $requestId (type: ${requestId.runtimeType})');
-    
+
     // Send to message controller
     if (!_messageController.isClosed) {
       _messageController.add(jsonRpcRequest);
     }
-    
+
     try {
       // Wait for response with timeout
       final response = await completer.future.timeout(
         config.requestTimeout,
         onTimeout: () => throw TimeoutException('Request timeout'),
       );
-      
-      // For initialize requests, mark as initialized
-      if (isInitialize && response['result'] != null) {
-        _isFirstMessage = false;
-        _logger.debug('StreamableHTTP session initialized successfully');
-      }
-      
+
       // Send direct JSON response
       request.response.statusCode = HttpStatus.ok;
       request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
-      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
       // Use UTF-8 encoding to handle international characters
       final responseBytes = utf8.encode(json.encode(response));
       request.response.add(responseBytes);
@@ -458,7 +516,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     } catch (e, stackTrace) {
       _logger.error('Error in _handleSyncJsonResponse: $e');
       _logger.debug('Stack trace: $stackTrace');
-      
+
       // Send error response
       final errorResponse = {
         'jsonrpc': '2.0',
@@ -468,7 +526,7 @@ class StreamableHttpServerTransport implements ServerTransport {
         },
         'id': requestId,
       };
-      
+
       request.response.statusCode = HttpStatus.internalServerError;
       request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
       request.response.add(utf8.encode(json.encode(errorResponse)));
@@ -479,25 +537,26 @@ class StreamableHttpServerTransport implements ServerTransport {
   }
   
   /// Handle asynchronous JSON response mode with polling
-  Future<void> _handleAsyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
+  Future<void> _handleAsyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
-    final responseKey = '$_sessionId:$requestId';
-    
-    // Store pending request
+    final responseKey = '$sessionId:$requestId';
+
+    // Store pending request with sessionId
     _pendingRequests[requestId] = _PendingRequest(
       request: request,
       timestamp: DateTime.now(),
+      sessionId: sessionId,
     );
-    
+
     // Send to message controller
     if (!_messageController.isClosed) {
       _messageController.add(jsonRpcRequest);
     }
-    
+
     // Return 202 Accepted with Location header
     request.response.statusCode = HttpStatus.accepted;
     request.response.headers.set('Content-Type', contentTypeJson);
-    request.response.headers.set(mcpSessionIdHeader, _sessionId);
+    request.response.headers.set(mcpSessionIdHeader, sessionId);
     request.response.headers.set('Location', '${config.endpoint}/responses/$responseKey');
     await request.response.close();
   }
@@ -505,31 +564,34 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// Handle response polling for async JSON mode
   Future<void> _handleResponsePolling(HttpRequest request) async {
     final path = request.uri.path;
-    final basePath = config.endpoint.endsWith('/') 
-        ? config.endpoint.substring(0, config.endpoint.length - 1) 
+    final basePath = config.endpoint.endsWith('/')
+        ? config.endpoint.substring(0, config.endpoint.length - 1)
         : config.endpoint;
-    
+
     final responseKey = path.substring('$basePath/responses/'.length);
-    
+
+    // Extract sessionId from responseKey (format: "sessionId:requestId")
+    final sessionId = responseKey.split(':').first;
+
     _setCorsHeaders(request.response);
-    
+
     if (_responseStore.containsKey(responseKey)) {
       final response = _responseStore[responseKey]!;
-      
+
       // Send the stored response
       request.response.statusCode = HttpStatus.ok;
       request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
-      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
       request.response.add(utf8.encode(json.encode(response)));
       await request.response.close();
-      
+
       // Clean up
       _responseStore.remove(responseKey);
       _responseTimestamps.remove(responseKey);
     } else {
       // Response not ready yet
       request.response.statusCode = HttpStatus.noContent;
-      request.response.headers.set(mcpSessionIdHeader, _sessionId);
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
       await request.response.close();
     }
   }
@@ -553,26 +615,26 @@ class StreamableHttpServerTransport implements ServerTransport {
   }
   
   /// Handle request with SSE response (StreamableHTTP default)
-  Future<void> _handleSseResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest) async {
+  Future<void> _handleSseResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
-    
+
     // Set SSE headers
     request.response.headers.set('Content-Type', contentTypeSse);
     request.response.headers.set('Cache-Control', 'no-cache, no-transform');
     request.response.headers.set('Connection', 'keep-alive');
-    request.response.headers.set(mcpSessionIdHeader, _sessionId);
-    
+    request.response.headers.set(mcpSessionIdHeader, sessionId);
+
     // Create SSE stream for this request
     final sseController = StreamController<String>();
     _sseStreams[requestId] = SseStreamInfo(
       controller: sseController,
       response: request.response,
     );
-    
+
     // Create message router for this request
     final messageRouter = StreamController<dynamic>();
     _messageRouters[requestId] = messageRouter;
-    
+
     // Start sending SSE events with proper UTF-8 encoding
     sseController.stream.listen(
       (data) {
@@ -589,7 +651,7 @@ class StreamableHttpServerTransport implements ServerTransport {
         _messageRouters.remove(requestId)?.close();
       },
     );
-    
+
     // Send to message controller
     if (!_messageController.isClosed) {
       _messageController.add(jsonRpcRequest);
@@ -600,88 +662,146 @@ class StreamableHttpServerTransport implements ServerTransport {
   Future<void> _handleGetRequest(HttpRequest request) async {
     _logger.debug('Handling GET request');
     _logger.debug('Headers: ${request.headers}');
-    
+
+    // Check if GET stream is enabled per MCP 2025-03-26
+    if (!config.enableGetStream) {
+      _logger.debug('GET stream disabled - returning 405 Method Not Allowed');
+      // For GET requests without session, use empty string as sessionId
+      _sendErrorResponse(
+        request.response,
+        '',
+        'Method Not Allowed: GET stream is disabled',
+        HttpStatus.methodNotAllowed,
+      );
+      request.response.headers.set('Allow', 'POST, OPTIONS, DELETE');
+      return;
+    }
+
     // Validate Bearer token first (if configured)
     if (!_validateBearerToken(request)) {
       return;
     }
-    
+
+    // Extract or create session ID
+    final sessionId = _getOrCreateSessionId(request);
+
+    // Check if session is terminated
+    if (_isSessionTerminated(sessionId)) {
+      _sendErrorResponse(
+        request.response,
+        sessionId,
+        'Not Found: Session has been terminated',
+        HttpStatus.notFound,
+      );
+      return;
+    }
+
     // Validate Accept header - more lenient for GET requests
     final acceptHeader = request.headers.value('accept');
     _logger.debug('Accept header: $acceptHeader');
-    
-    if (acceptHeader != null && 
-        !acceptHeader.contains(contentTypeSse) && 
+
+    if (acceptHeader != null &&
+        !acceptHeader.contains(contentTypeSse) &&
         !acceptHeader.contains('*/*')) {
       _logger.debug('Rejecting GET request - wrong Accept header');
       _sendErrorResponse(
         request.response,
+        sessionId,
         'Not Acceptable: Client must accept text/event-stream',
         HttpStatus.notAcceptable,
       );
       return;
     }
-    
-    if (!await _validateSession(request)) {
-      _logger.debug('Session validation failed for GET request');
-      return;
-    }
-    
+
     _logger.debug('Session validated successfully');
-    
-    // Check if GET stream already exists
-    if (_getStream != null) {
-      _logger.debug('GET stream already exists - rejecting');
-      _sendErrorResponse(
-        request.response,
-        'Conflict: Only one SSE stream is allowed per session',
-        HttpStatus.conflict,
-      );
-      return;
+
+    // Check if GET stream already exists for this session (reconnection scenario)
+    if (_getStreams.containsKey(sessionId)) {
+      _logger.info('🔄 Closing existing GET stream for session $sessionId (client reconnecting)');
+      final existingStream = _getStreams[sessionId];
+      try {
+        await existingStream?.controller.close();
+      } catch (e) {
+        _logger.warning('Error closing existing stream: $e');
+      }
+      _getStreams.remove(sessionId);
     }
-    
+
     // Handle resumability
     final lastEventId = request.headers.value(lastEventIdHeader);
     if (lastEventId != null) {
-      await _replayEvents(request, lastEventId);
+      await _replayEvents(request, lastEventId, sessionId);
       return;
     }
-    
+
     // Set SSE headers
     request.response.headers.set('Content-Type', contentTypeSse);
     request.response.headers.set('Cache-Control', 'no-cache, no-transform');
     request.response.headers.set('Connection', 'keep-alive');
-    request.response.headers.set(mcpSessionIdHeader, _sessionId);
-    
-    // Create GET stream
+    request.response.headers.set(mcpSessionIdHeader, sessionId);
+
+    // Disable buffering for immediate SSE delivery
+    request.response.bufferOutput = false;
+
+    // Create GET stream for this session
     final sseController = StreamController<String>();
-    _getStream = SseStreamInfo(
+    _getStreams[sessionId] = SseStreamInfo(
       controller: sseController,
       response: request.response,
     );
-    
+
     // Start sending SSE events with proper UTF-8 encoding
     sseController.stream.listen(
       (data) {
+        _logger.debug('StreamController callback executing: sending ${data.length} bytes to response');
         request.response.add(utf8.encode(data));
+        // Note: Synchronous callback for stream processing - flush happens automatically
+        _logger.debug('Data added to response buffer');
       },
       onDone: () async {
         await request.response.close();
-        _getStream = null;
+        _getStreams.remove(sessionId);
       },
       onError: (error) {
-        _logger.error('GET SSE stream error: $error');
-        _getStream = null;
+        _logger.error('GET SSE stream error for session $sessionId: $error');
+        _getStreams.remove(sessionId);
       },
     );
-    
+
+    // Listen for client disconnect to clean up GET stream
+    request.response.done.then((_) {
+      _logger.info('Client disconnected for session $sessionId');
+      if (_getStreams.containsKey(sessionId)) {
+        _getStreams[sessionId]?.controller.close();
+        _getStreams.remove(sessionId);
+      }
+    }).catchError((error) {
+      _logger.error('Error in response.done for session $sessionId: $error');
+      _getStreams.remove(sessionId);
+    });
+
+    // Send initial SSE keepalive comment to establish connection
+    // This follows SSE standard practice: servers send initial event/comment
+    // to confirm connection establishment and prevent HTTP response buffering
+    final getStream = _getStreams[sessionId];
+    if (getStream != null) {
+      // Write directly to response and flush to ensure immediate delivery
+      final initialData = utf8.encode(':keepalive\n\n');
+      getStream.response.add(initialData);
+      await getStream.response.flush();
+      _logger.debug('Sent initial SSE keepalive comment and flushed GET stream');
+    }
+
     // Send any queued responses (for JSON mode)
     if (config.isJsonResponseEnabled && _pendingResponseQueue.isNotEmpty) {
-      _logger.debug('Sending ${_pendingResponseQueue.length} queued responses');
-      for (final event in _pendingResponseQueue) {
-        _sendSseEvent(_getStream!.controller, event.message, eventId: event.eventId);
+      _logger.debug('Sending ${_pendingResponseQueue.length} queued responses for session $sessionId');
+      final getStream = _getStreams[sessionId];
+      if (getStream != null) {
+        for (final event in _pendingResponseQueue) {
+          _sendSseEvent(getStream.controller, event.message, eventId: event.eventId);
+        }
+        _pendingResponseQueue.clear();
       }
-      _pendingResponseQueue.clear();
     } else {
       _logger.debug('No queued responses to send. Queue size: ${_pendingResponseQueue.length}');
     }
@@ -693,24 +813,29 @@ class StreamableHttpServerTransport implements ServerTransport {
     if (!_validateBearerToken(request)) {
       return;
     }
-    
-    if (!await _validateSession(request)) {
-      return;
+
+    // Extract session ID
+    final sessionId = _getOrCreateSessionId(request);
+
+    // Mark session as terminated
+    _terminatedSessions.add(sessionId);
+    _activeSessions.remove(sessionId);
+
+    // Close session-specific GET stream
+    if (_getStreams.containsKey(sessionId)) {
+      await _getStreams[sessionId]?.controller.close();
+      _getStreams.remove(sessionId);
     }
-    
-    _terminated = true;
-    
-    // Close all SSE streams
-    for (final stream in _sseStreams.values) {
-      await stream.controller.close();
+
+    // Close session-specific message controller
+    if (_sessionMessageControllers.containsKey(sessionId)) {
+      await _sessionMessageControllers[sessionId]?.close();
+      _sessionMessageControllers.remove(sessionId);
     }
-    _sseStreams.clear();
-    
-    if (_getStream != null) {
-      await _getStream!.controller.close();
-      _getStream = null;
-    }
-    
+
+    // Note: We don't close all SSE streams here, only session-specific ones
+    // Request-specific SSE streams (_sseStreams) are managed per-request, not per-session
+
     request.response.statusCode = HttpStatus.noContent;
     await request.response.close();
   }
@@ -753,6 +878,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       _logger.debug('Bearer token validation failed - expected: Bearer ${config.authToken}, got: $authHeader');
       _sendErrorResponse(
         request.response,
+        '',
         'Unauthorized: Invalid or missing Bearer token',
         HttpStatus.unauthorized,
       );
@@ -763,44 +889,12 @@ class StreamableHttpServerTransport implements ServerTransport {
     return true;
   }
   
-  /// Validate session
-  Future<bool> _validateSession(HttpRequest request) async {
-    final sessionId = request.headers.value(mcpSessionIdHeader);
-    _logger.debug('Validating session - client ID: $sessionId, server ID: $_sessionId');
-    
-    // If no session ID is provided, allow it for initial requests
-    if (sessionId == null) {
-      _logger.debug('No session ID provided - allowing request');
-      return true;
-    }
-    
-    // For first message (initialize), adopt the client's session ID
-    if (_isFirstMessage) {
-      _logger.debug('First message detected - adopting client session ID: $sessionId');
-      _sessionId = sessionId;
-      return true;
-    }
-    
-    // If session ID is provided, it must match
-    if (sessionId != _sessionId) {
-      _logger.debug('Session ID mismatch! Client: $sessionId, Server: $_sessionId');
-      _sendErrorResponse(
-        request.response,
-        'Forbidden: Invalid session ID',
-        HttpStatus.forbidden,
-      );
-      return false;
-    }
-    
-    _logger.debug('Session ID matches');
-    return true;
-  }
-  
   /// Replay events after a given event ID (simplified implementation)
-  Future<void> _replayEvents(HttpRequest request, String lastEventId) async {
+  Future<void> _replayEvents(HttpRequest request, String lastEventId, String sessionId) async {
     // For now, return a simple error - full implementation would replay stored events
     _sendErrorResponse(
       request.response,
+      sessionId,
       'Bad Request: Event resumption not fully implemented',
       HttpStatus.badRequest,
     );
@@ -822,22 +916,25 @@ class StreamableHttpServerTransport implements ServerTransport {
   }
   
   /// Send error response
-  void _sendErrorResponse(HttpResponse response, String message, int statusCode) {
+  void _sendErrorResponse(HttpResponse response, String sessionId, String message, int statusCode) {
     response.statusCode = statusCode;
     response.headers.set('Content-Type', 'application/json; charset=utf-8');
-    response.headers.set(mcpSessionIdHeader, _sessionId);
-    
+    if (sessionId.isNotEmpty) {
+      response.headers.set(mcpSessionIdHeader, sessionId);
+    }
+
     final error = {
       'error': message,
     };
-    
+
     response.add(utf8.encode(jsonEncode(error)));
     response.close();
   }
-  
+
   /// Send JSON-RPC error
   void _sendJsonRpcError(
     HttpResponse response,
+    String sessionId,
     dynamic id,
     int code,
     String message,
@@ -845,8 +942,10 @@ class StreamableHttpServerTransport implements ServerTransport {
   ) {
     response.statusCode = HttpStatus.ok;
     response.headers.set('Content-Type', 'application/json; charset=utf-8');
-    response.headers.set(mcpSessionIdHeader, _sessionId);
-    
+    if (sessionId.isNotEmpty) {
+      response.headers.set(mcpSessionIdHeader, sessionId);
+    }
+
     final errorResponse = {
       'jsonrpc': '2.0',
       'error': {
@@ -856,7 +955,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       },
       if (id != null) 'id': id,
     };
-    
+
     response.add(utf8.encode(jsonEncode(errorResponse)));
     response.close();
   }
@@ -922,10 +1021,16 @@ class StreamableHttpServerTransport implements ServerTransport {
             }
           } else {
             // Asynchronous JSON mode: store response for polling
-            final responseKey = '$_sessionId:$requestId';
-            _responseStore[responseKey] = Map<String, dynamic>.from(message);
-            _responseTimestamps[responseKey] = DateTime.now();
-            _pendingRequests.remove(requestId);
+            // Get sessionId from pending request
+            final pendingRequest = _pendingRequests[requestId];
+            if (pendingRequest != null) {
+              final responseKey = '${pendingRequest.sessionId}:$requestId';
+              _responseStore[responseKey] = Map<String, dynamic>.from(message);
+              _responseTimestamps[responseKey] = DateTime.now();
+              _pendingRequests.remove(requestId);
+            } else {
+              _logger.warning('No pending request found for async response ID: $requestId');
+            }
           }
         } else if (_sseStreams.containsKey(requestId)) {
           // SSE response for specific request
@@ -946,14 +1051,47 @@ class StreamableHttpServerTransport implements ServerTransport {
         }
       } else {
         // Notification or server-initiated message
-        // Send to GET stream if available
-        if (_getStream != null) {
-          final eventId = (_eventIdCounter++).toString();
-          _eventStore[eventId] = EventMessage(
-            message: Map<String, dynamic>.from(message),
-            eventId: eventId,
-          );
-          _sendSseEvent(_getStream!.controller, Map<String, dynamic>.from(message), eventId: eventId);
+        final eventId = (_eventIdCounter++).toString();
+
+        // Remove internal metadata before storing and sending
+        final cleanMessage = Map<String, dynamic>.from(message);
+        final targetSessionId = cleanMessage.remove('_targetSessionId') as String?;
+
+        _eventStore[eventId] = EventMessage(
+          message: cleanMessage,
+          eventId: eventId,
+        );
+
+        var sent = false;
+
+        // If target session is specified, send only to that session's GET stream
+        if (targetSessionId != null && _getStreams.containsKey(targetSessionId)) {
+          _logger.debug('📤 Sending notification to target session: $targetSessionId');
+          _sendSseEvent(_getStreams[targetSessionId]!.controller, cleanMessage, eventId: eventId);
+          sent = true;
+        } else if (targetSessionId == null) {
+          // Broadcast mode: send to all GET streams
+          for (final entry in _getStreams.entries) {
+            _logger.debug('📤 Broadcasting notification to GET stream (session: ${entry.key})');
+            _sendSseEvent(entry.value.controller, cleanMessage, eventId: eventId);
+            sent = true;
+          }
+
+          // If no GET stream available, send to all active POST SSE streams
+          if (!sent && _sseStreams.isNotEmpty) {
+            _logger.debug('No GET stream available, sending to ${_sseStreams.length} active POST SSE streams');
+            for (final entry in _sseStreams.entries) {
+              _logger.debug('📤 Broadcasting notification to POST SSE stream (requestId: ${entry.key})');
+              _sendSseEvent(entry.value.controller, cleanMessage, eventId: eventId);
+              sent = true;
+            }
+          }
+        } else {
+          _logger.warning('Target session $targetSessionId not found or no GET stream available');
+        }
+
+        if (!sent) {
+          _logger.debug('No streams available to send notification');
         }
       }
     } catch (e, stackTrace) {
@@ -977,11 +1115,12 @@ class StreamableHttpServerTransport implements ServerTransport {
       await stream.controller.close();
     }
     _sseStreams.clear();
-    
-    if (_getStream != null) {
-      await _getStream!.controller.close();
-      _getStream = null;
+
+    // Close all GET streams
+    for (final stream in _getStreams.values) {
+      await stream.controller.close();
     }
+    _getStreams.clear();
     
     // Close pending requests and message routers
     for (final pendingRequest in _pendingRequests.values) {
@@ -1026,9 +1165,11 @@ class StreamableHttpServerTransport implements ServerTransport {
 class _PendingRequest {
   final HttpRequest request;
   final DateTime timestamp;
-  
+  final String sessionId;
+
   _PendingRequest({
     required this.request,
     required this.timestamp,
+    required this.sessionId,
   });
 }

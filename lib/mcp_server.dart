@@ -391,7 +391,6 @@ class McpServer {
           isJsonResponseEnabled: isJsonResponseEnabled,
           authToken: authToken,
         ),
-        sessionId: sessionId,
       );
       // Start the server and wait for it to be ready
       await transport.start();
@@ -421,7 +420,6 @@ class McpServer {
           isJsonResponseEnabled: isJsonResponseEnabled,
           authToken: authToken,
         ),
-        sessionId: sessionId,
       );
       return transport;
     });

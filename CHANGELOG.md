@@ -1,3 +1,13 @@
+## 1.0.3
+
+### Bug Fixes
+- **StreamableHTTP MCP 2025-03-26 Compliance**
+  - Fixed POST SSE stream closure: now closes immediately after sending response per spec
+  - Added `enableGetStream` config option for optional GET stream support (default: true)
+  - GET stream properly returns 405 Method Not Allowed when disabled
+  - Ensures notifications use appropriate stream channels per MCP standard
+  - Fixed 409 Conflict error: GET streams now managed per-session
+
 ## 1.0.2 
 
 ### 🔒 Security Enhancements

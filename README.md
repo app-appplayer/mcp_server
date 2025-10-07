@@ -18,6 +18,7 @@ Support makemind via [PayPal](https://www.paypal.com/ncp/payment/F7G56QD9LSJ92)
 - [`flutter_mcp_ui_core`](https://pub.dev/packages/flutter_mcp_ui_core): Core models, constants, and utilities for Flutter MCP UI system. 
 - [`flutter_mcp_ui_runtime`](https://pub.dev/packages/flutter_mcp_ui_runtime): Comprehensive runtime for building dynamic, reactive UIs through JSON specifications.
 - [`flutter_mcp_ui_generator`](https://pub.dev/packages/flutter_mcp_ui_generator): JSON generation toolkit for creating UI definitions with templates and fluent API. 
+- [`mcp_flow_runtime`](https://pub.dev/packages/mcp_flow_runtime): Declarative runtime for hardware control and IoT orchestration using MCP Flow DSL.
 
 ---
 
@@ -57,7 +58,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_server: ^1.0.2
+  mcp_server: ^1.0.3
 ```
 
 Or install via command line:

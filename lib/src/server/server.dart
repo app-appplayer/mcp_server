@@ -109,7 +109,11 @@ class Server implements ServerInterface {
   final _toolsChangedController = StreamController<void>.broadcast();
   final _resourcesChangedController = StreamController<void>.broadcast();
   final _promptsChangedController = StreamController<void>.broadcast();
-  
+
+  /// Stream controllers for resource subscription events
+  final _resourceSubscribedController = StreamController<String>.broadcast();
+  final _resourceUnsubscribedController = StreamController<String>.broadcast();
+
   /// Server roots
   final List<Root> _roots = [];
   
@@ -139,6 +143,12 @@ class Server implements ServerInterface {
   
   /// Stream of prompts change events
   Stream<void> get onPromptsChanged => _promptsChangedController.stream;
+
+  /// Stream of resource subscription events (emits resource URI)
+  Stream<String> get onResourceSubscribed => _resourceSubscribedController.stream;
+
+  /// Stream of resource unsubscription events (emits resource URI)
+  Stream<String> get onResourceUnsubscribed => _resourceUnsubscribedController.stream;
 
   /// Whether the server is currently connected
   bool get isConnected => _transport != null;
@@ -173,22 +183,68 @@ class Server implements ServerInterface {
 
     _transport = transport;
 
-    // Create a new session
-    final sessionId = _createSession(transport);
+    // Determine if this is a multi-session transport (StreamableHTTP)
+    final isMultiSessionTransport = transport is StreamableHttpServerTransport;
+
+    // Create initial session only for single-session transports (for backward compatibility)
+    String? initialSessionId;
+    if (!isMultiSessionTransport) {
+      initialSessionId = _createSession(transport);
+    }
 
     try {
       transport.onMessage.listen((rawMessage) {
-        _handleMessage(sessionId, rawMessage);
+        // Extract session ID from message metadata (if present)
+        String? messageSessionId;
+
+        if (rawMessage is Map && rawMessage.containsKey('_sessionId')) {
+          // Multi-session transport: use session ID from message
+          messageSessionId = rawMessage['_sessionId'] as String;
+
+          // Create session if it doesn't exist
+          if (!_sessions.containsKey(messageSessionId)) {
+            _logger.debug('Creating new session from transport message: $messageSessionId');
+            final session = ClientSession(
+              id: messageSessionId,
+              connectedAt: DateTime.now(),
+              transport: transport,  // IMPORTANT: Set transport reference for sending responses
+            );
+            session.capabilities = {};
+            _sessions[messageSessionId] = session;
+
+            // Update metrics
+            _metricsCollector.gauge('mcp_connections_active').set(_sessions.length.toDouble());
+            _metricsCollector.counter('mcp_connections_total').increment();
+          }
+        } else {
+          // Single-session transport: use initial session ID
+          messageSessionId = initialSessionId;
+        }
+
+        if (messageSessionId == null) {
+          _logger.error('No session ID available for message: $rawMessage');
+          return;
+        }
+
+        _handleMessage(messageSessionId, rawMessage);
       }, onError: (error) {
         _logger.error('Error from transport message stream: $error');
       });
 
       transport.onClose.then((_) {
-        _removeSession(sessionId);
+        // Remove all sessions associated with this transport
+        final sessionIds = List<String>.from(_sessions.keys);
+        for (final sid in sessionIds) {
+          _removeSession(sid);
+        }
         _onDisconnect();
       }).catchError((error) {
         _logger.error('Transport close error: $error');
-        _removeSession(sessionId);
+        // Remove all sessions associated with this transport
+        final sessionIds = List<String>.from(_sessions.keys);
+        for (final sid in sessionIds) {
+          _removeSession(sid);
+        }
         _onDisconnect();
       });
     } catch (e) {
@@ -217,17 +273,11 @@ class Server implements ServerInterface {
   /// Create a new client session
   String _createSession(ServerTransport transport) {
     String sessionId;
-    
-    // Check if transport already has a session ID (e.g., StreamableHTTP)
-    if (transport is StreamableHttpServerTransport) {
-      // Use the transport's existing session ID
-      sessionId = transport.sessionId;
-      _logger.debug('Using existing session ID from StreamableHTTP transport: $sessionId');
-    } else {
-      // Generate a new session ID for other transports
-      sessionId = Uuid().v4();
-      _logger.debug('Generated new session ID: $sessionId');
-    }
+
+    // Generate a new session ID
+    // Note: StreamableHTTP now manages multiple sessions internally
+    sessionId = Uuid().v4();
+    _logger.debug('Generated new session ID: $sessionId');
 
     final session = ClientSession(
       id: sessionId,
@@ -261,13 +311,13 @@ class Server implements ServerInterface {
 
     _sessions.remove(sessionId);
     _logger.debug('Removed session: $sessionId');
-    
+
     // Update metrics
     _metricsCollector.gauge('mcp_connections_active').set(_sessions.length.toDouble());
 
     // Remove session from resource subscriptions
-    for (final uri in _resourceSubscriptions.keys) {
-      _resourceSubscriptions[uri]?.remove(sessionId);
+    for (final subscribers in _resourceSubscriptions.values) {
+      subscribers.remove(sessionId);
     }
 
     // Clean up empty subscription entries
@@ -280,6 +330,11 @@ class Server implements ServerInterface {
 
     // Remove completed or cancelled operations
     _pendingOperations.removeWhere((_, op) => op.isCancelled);
+  }
+
+  /// Check if session exists
+  bool hasSession(String sessionId) {
+    return _sessions.containsKey(sessionId);
   }
 
   /// Register a pending operation for cancellation support
@@ -721,6 +776,8 @@ class Server implements ServerInterface {
     _toolsChangedController.close();
     _resourcesChangedController.close();
     _promptsChangedController.close();
+    _resourceSubscribedController.close();
+    _resourceUnsubscribedController.close();
   }
 
   /// Handle incoming messages from the transport
@@ -1387,6 +1444,9 @@ class Server implements ServerInterface {
     }
     _resourceSubscriptions[uri]!.add(sessionId);
 
+    // Emit subscription event
+    _resourceSubscribedController.add(uri);
+
     _sendResponse(sessionId, request.id, {'success': true});
   }
 
@@ -1408,6 +1468,9 @@ class Server implements ServerInterface {
     if (_resourceSubscriptions[uri]?.isEmpty ?? false) {
       _resourceSubscriptions.remove(uri);
     }
+
+    // Emit unsubscription event
+    _resourceUnsubscribedController.add(uri);
 
     _sendResponse(sessionId, request.id, {'success': true});
   }
@@ -1717,6 +1780,7 @@ class Server implements ServerInterface {
       'jsonrpc': '2.0',
       'method': method,
       'params': params,
+      '_targetSessionId': sessionId,  // Add target session ID for multi-session transports
     };
 
     session.transport.send(notification);
