@@ -1,3 +1,10 @@
+## [1.0.4] - 2026-04-28
+
+### Changed
+- README cleanup — removed "MCP Family" section, installation block, dev.to articles, and donation links.
+
+---
+
 ## 1.0.3
 
 ### Bug Fixes
