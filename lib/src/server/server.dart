@@ -848,16 +848,33 @@ class Server implements ServerInterface {
 
   /// Handle incoming messages from the transport.
   ///
-  /// JSON-RPC batching was removed in MCP 2025-06-18 (PR #416). A batch
-  /// array on the wire is treated as an invalid request — clients must
-  /// send individual messages.
+  /// JSON-RPC batching was removed in MCP 2025-06-18 (PR #416). For
+  /// sessions that negotiated 2024-11-05 or 2025-03-26 we accept batch
+  /// arrays and dispatch each entry individually; for 2025-06-18+ we
+  /// reject batches as invalid requests.
   void _handleMessage(String sessionId, dynamic rawMessage) {
     try {
       final parsed = rawMessage is String ? jsonDecode(rawMessage) : rawMessage;
 
       if (parsed is List) {
-        _sendErrorResponse(sessionId, null, ErrorCode.invalidRequest,
-            'JSON-RPC batching is not supported (removed in MCP 2025-06-18)');
+        final session = _sessions[sessionId];
+        final negotiated = session?.negotiatedProtocolVersion;
+        final allowBatching = negotiated == null
+            ? false
+            : McpProtocol.supportsBatching(negotiated);
+        if (!allowBatching) {
+          _sendErrorResponse(sessionId, null, ErrorCode.invalidRequest,
+              'JSON-RPC batching is not supported on protocol '
+              '${negotiated ?? 'unnegotiated'} (removed in 2025-06-18)');
+          return;
+        }
+        for (final item in parsed) {
+          if (item is Map<String, dynamic>) {
+            final message = JsonRpcMessage.fromJson(item);
+            message.sessionId = sessionId;
+            _messageController.add(message);
+          }
+        }
       } else if (parsed is Map<String, dynamic>) {
         final message = JsonRpcMessage.fromJson(parsed);
         message.sessionId = sessionId; // Attach session ID

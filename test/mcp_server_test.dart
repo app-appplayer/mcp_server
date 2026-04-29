@@ -37,8 +37,13 @@ void main() {
     });
 
     test('Server supports 2025-03-26 protocol version', () {
+      // 2025-03-26 remains in the supported list for backward compatibility,
+      // but newer revisions (2025-06-18, 2025-11-25) are now also supported
+      // and `latest` advances to the newest one.
       expect(McpProtocol.supportedVersions, contains(McpProtocol.v2025_03_26));
-      expect(McpProtocol.latest, equals(McpProtocol.v2025_03_26));
+      expect(McpProtocol.supportedVersions, contains(McpProtocol.v2025_06_18));
+      expect(McpProtocol.supportedVersions, contains(McpProtocol.v2025_11_25));
+      expect(McpProtocol.latest, equals(McpProtocol.v2025_11_25));
     });
 
     test('Server can register tools with enhanced features', () {

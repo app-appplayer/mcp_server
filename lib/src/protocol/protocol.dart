@@ -9,10 +9,44 @@ class McpProtocol {
   // Protocol versions
   static const String v2024_11_05 = "2024-11-05";
   static const String v2025_03_26 = "2025-03-26";
-  static const String latest = v2025_03_26;
-  
+  static const String v2025_06_18 = "2025-06-18";
+  static const String v2025_11_25 = "2025-11-25";
+  static const String latest = v2025_11_25;
+
   /// All supported versions in order of preference (newest first)
-  static const List<String> supportedVersions = [v2025_03_26, v2024_11_05];
+  static const List<String> supportedVersions = [
+    v2025_11_25,
+    v2025_06_18,
+    v2025_03_26,
+    v2024_11_05,
+  ];
+
+  /// Whether the negotiated [version] supports JSON-RPC batching.
+  /// Removed in 2025-06-18 (PR #416).
+  static bool supportsBatching(String version) =>
+      version == v2024_11_05 || version == v2025_03_26;
+
+  /// Whether the negotiated [version] knows the `elicitation/create`
+  /// server → client request (introduced in 2025-06-18).
+  static bool supportsElicitation(String version) =>
+      version == v2025_06_18 || version == v2025_11_25;
+
+  /// Whether the negotiated [version] understands the `MCP-Protocol-Version`
+  /// HTTP header (mandatory after negotiation from 2025-06-18 onwards).
+  static bool requiresProtocolHeader(String version) =>
+      version == v2025_06_18 || version == v2025_11_25;
+
+  /// Whether the negotiated [version] understands `Tool.outputSchema`,
+  /// `CallToolResult.structuredContent`, and `resource_link` content
+  /// (introduced in 2025-06-18).
+  static bool supportsStructuredToolOutput(String version) =>
+      version == v2025_06_18 || version == v2025_11_25;
+
+  /// Whether the negotiated [version] understands `Tool.icons`,
+  /// sampling `tools` / `toolChoice`, and URL-mode elicitation
+  /// (introduced in 2025-11-25).
+  static bool supportsIconsAndSamplingTools(String version) =>
+      version == v2025_11_25;
   
   // Method names (aliases for compatibility)
   static const String methodInitialize = 'initialize';
