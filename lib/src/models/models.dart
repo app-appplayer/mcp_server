@@ -38,9 +38,90 @@ abstract class Content {
     return switch (type) {
       'text' => TextContent.fromJson(json),
       'image' => ImageContent.fromJson(json),
+      'audio' => AudioContent.fromJson(json),
       'resource' => ResourceContent.fromJson(json),
+      'resource_link' => ResourceLinkContent.fromJson(json),
       _ => throw ArgumentError('Unknown content type: $type'),
     };
+  }
+}
+
+/// Audio content (spec 2025-03-26+).
+@immutable
+class AudioContent extends Content {
+  final String data; // base64-encoded audio bytes
+  final String mimeType;
+  final Map<String, dynamic>? annotations;
+
+  const AudioContent({
+    required this.data,
+    required this.mimeType,
+    this.annotations,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'type': 'audio',
+      'data': data,
+      'mimeType': mimeType,
+    };
+    if (annotations != null) json['annotations'] = annotations!;
+    return json;
+  }
+
+  factory AudioContent.fromJson(Map<String, dynamic> json) {
+    return AudioContent(
+      data: json['data'] as String,
+      mimeType: json['mimeType'] as String,
+      annotations: json['annotations'] as Map<String, dynamic>?,
+    );
+  }
+}
+
+/// Resource link content (spec 2025-06-18+) — a tool result that points
+/// to a server resource by URI without inlining the content.
+@immutable
+class ResourceLinkContent extends Content {
+  final String uri;
+  final String? name;
+  final String? description;
+  final String? mimeType;
+  final Map<String, dynamic>? annotations;
+  final Map<String, dynamic>? meta;
+
+  const ResourceLinkContent({
+    required this.uri,
+    this.name,
+    this.description,
+    this.mimeType,
+    this.annotations,
+    this.meta,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'type': 'resource_link',
+      'uri': uri,
+    };
+    if (name != null) json['name'] = name;
+    if (description != null) json['description'] = description;
+    if (mimeType != null) json['mimeType'] = mimeType;
+    if (annotations != null) json['annotations'] = annotations;
+    if (meta != null) json['_meta'] = meta;
+    return json;
+  }
+
+  factory ResourceLinkContent.fromJson(Map<String, dynamic> json) {
+    return ResourceLinkContent(
+      uri: json['uri'] as String,
+      name: json['name'] as String?,
+      description: json['description'] as String?,
+      mimeType: json['mimeType'] as String?,
+      annotations: json['annotations'] as Map<String, dynamic>?,
+      meta: json['_meta'] as Map<String, dynamic>?,
+    );
   }
 }
 
@@ -176,16 +257,37 @@ class ResourceContent extends Content {
 @immutable
 class Tool {
   final String name;
+
+  /// Spec 2025-06-18+: human-readable display name. Falls back to [name]
+  /// when null.
+  final String? title;
   final String description;
   final Map<String, dynamic> inputSchema;
+
+  /// Spec 2025-06-18+: optional JSON Schema describing the structured
+  /// result the tool produces. When present, the runtime SHOULD validate
+  /// `CallToolResult.structuredContent` against it.
+  final Map<String, dynamic>? outputSchema;
+
+  /// Spec 2025-11-25+: visual metadata (icon objects with `src`, optional
+  /// `sizes` and `mimeType`).
+  final List<Map<String, dynamic>>? icons;
+
+  /// Spec 2025-06-18+: free-form metadata.
+  final Map<String, dynamic>? meta;
+
   final bool? supportsProgress;
   final bool? supportsCancellation;
   final Map<String, dynamic>? metadata;
 
   const Tool({
     required this.name,
+    this.title,
     required this.description,
     required this.inputSchema,
+    this.outputSchema,
+    this.icons,
+    this.meta,
     this.supportsProgress,
     this.supportsCancellation,
     this.metadata,
@@ -197,17 +299,27 @@ class Tool {
       'description': description,
       'inputSchema': inputSchema,
     };
+    if (title != null) json['title'] = title;
+    if (outputSchema != null) json['outputSchema'] = outputSchema;
+    if (icons != null) json['icons'] = icons;
+    if (meta != null) json['_meta'] = meta;
     if (supportsProgress == true) json['supportsProgress'] = supportsProgress;
     if (supportsCancellation == true) json['supportsCancellation'] = supportsCancellation;
     if (metadata != null) json['metadata'] = metadata!;
     return json;
   }
-  
+
   factory Tool.fromJson(Map<String, dynamic> json) {
     return Tool(
       name: json['name'] as String,
+      title: json['title'] as String?,
       description: json['description'] as String,
       inputSchema: json['inputSchema'] as Map<String, dynamic>,
+      outputSchema: json['outputSchema'] as Map<String, dynamic>?,
+      icons: (json['icons'] as List?)
+          ?.map((e) => Map<String, dynamic>.from(e as Map))
+          .toList(),
+      meta: json['_meta'] as Map<String, dynamic>?,
       supportsProgress: json['supportsProgress'] as bool?,
       supportsCancellation: json['supportsCancellation'] as bool?,
       metadata: json['metadata'] as Map<String, dynamic>?,
@@ -215,14 +327,21 @@ class Tool {
   }
 }
 
-/// Tool call result
+/// Tool call result.
+///
+/// Spec 2025-06-18 added `structuredContent` (optional JSON object that
+/// pairs with `Tool.outputSchema`). Tools returning structured content
+/// SHOULD also include the serialized JSON in a TextContent block for
+/// backward compatibility with clients that don't read structuredContent.
 class CallToolResult {
   final List<Content> content;
+  final Map<String, dynamic>? structuredContent;
   final bool isStreaming;
   final bool? isError;
 
   const CallToolResult({
     required this.content,
+    this.structuredContent,
     this.isStreaming = false,
     this.isError,
   });
@@ -230,6 +349,7 @@ class CallToolResult {
   Map<String, dynamic> toJson() {
     return {
       'content': content.map((c) => c.toJson()).toList(),
+      if (structuredContent != null) 'structuredContent': structuredContent,
       'isStreaming': isStreaming,
       if (isError != null) 'isError': isError,
     };
@@ -240,14 +360,20 @@ class CallToolResult {
 class ResourceTemplate {
   final String uriTemplate;
   final String name;
+  final String? title;
   final String description;
   final String? mimeType;
+  final List<Map<String, dynamic>>? icons;
+  final Map<String, dynamic>? meta;
 
   const ResourceTemplate({
     required this.uriTemplate,
     required this.name,
+    this.title,
     required this.description,
     this.mimeType,
+    this.icons,
+    this.meta,
   });
 
   Map<String, dynamic> toJson() {
@@ -256,9 +382,10 @@ class ResourceTemplate {
       'name': name,
       'description': description,
     };
-    if (mimeType != null) {
-      result['mimeType'] = mimeType;
-    }
+    if (title != null) result['title'] = title;
+    if (mimeType != null) result['mimeType'] = mimeType;
+    if (icons != null) result['icons'] = icons;
+    if (meta != null) result['_meta'] = meta;
     return result;
   }
 
@@ -266,8 +393,13 @@ class ResourceTemplate {
     return ResourceTemplate(
       uriTemplate: json['uriTemplate'] as String,
       name: json['name'] as String,
+      title: json['title'] as String?,
       description: json['description'] as String,
       mimeType: json['mimeType'] as String?,
+      icons: (json['icons'] as List?)
+          ?.map((e) => Map<String, dynamic>.from(e as Map))
+          .toList(),
+      meta: json['_meta'] as Map<String, dynamic>?,
     );
   }
 }
@@ -276,16 +408,22 @@ class ResourceTemplate {
 class Resource {
   final String uri;
   final String name;
+  final String? title;
   final String description;
   final String mimeType;
   final Map<String, dynamic>? uriTemplate;
+  final List<Map<String, dynamic>>? icons;
+  final Map<String, dynamic>? meta;
 
   Resource({
     required this.uri,
     required this.name,
+    this.title,
     required this.description,
     required this.mimeType,
     this.uriTemplate,
+    this.icons,
+    this.meta,
   });
 
   Map<String, dynamic> toJson() {
@@ -293,12 +431,15 @@ class Resource {
 
     result['uri'] = uri;
     result['name'] = name;
+    if (title != null) result['title'] = title;
     result['description'] = description;
     result['mimeType'] = mimeType;
 
     if (uriTemplate != null) {
       result['uriTemplate'] = uriTemplate;
     }
+    if (icons != null) result['icons'] = icons;
+    if (meta != null) result['_meta'] = meta;
 
     return result;
   }
@@ -392,20 +533,29 @@ class PromptArgument {
 /// Prompt definition
 class Prompt {
   final String name;
+  final String? title;
   final String description;
   final List<PromptArgument> arguments;
+  final List<Map<String, dynamic>>? icons;
+  final Map<String, dynamic>? meta;
 
   Prompt({
     required this.name,
+    this.title,
     required this.description,
     required this.arguments,
+    this.icons,
+    this.meta,
   });
 
   Map<String, dynamic> toJson() {
     return {
       'name': name,
+      if (title != null) 'title': title,
       'description': description,
       'arguments': arguments.map((arg) => arg.toJson()).toList(),
+      if (icons != null) 'icons': icons,
+      if (meta != null) '_meta': meta,
     };
   }
 }
