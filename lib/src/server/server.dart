@@ -29,6 +29,24 @@ typedef ResourceHandler = Future<dynamic> Function(String uri, Map<String, dynam
 /// Type definition for prompt handler functions
 typedef PromptHandler = Future<dynamic> Function(Map<String, dynamic> arguments);
 
+/// Type definition for completion handler functions (spec
+/// `completion/complete`).
+///
+/// [ref] identifies which prompt or resource template the completion is
+/// for. Spec shapes:
+/// - `{ "type": "ref/prompt", "name": "..." }`
+/// - `{ "type": "ref/resource", "uri": "..." }`
+///
+/// [argument] is `{ name, value }` — the partial value being completed.
+/// [context] holds previously-resolved arguments (spec 2025-06-18).
+///
+/// Returns `{ values, total?, hasMore? }`. `values` MUST have ≤ 100 entries.
+typedef CompletionHandler = Future<Map<String, dynamic>> Function(
+  Map<String, dynamic> ref,
+  Map<String, dynamic> argument,
+  Map<String, dynamic>? context,
+);
+
 /// Main MCP Server class that handles all server-side protocol operations
 class Server implements ServerInterface {
   /// Name of the MCP server
@@ -63,6 +81,11 @@ class Server implements ServerInterface {
 
   /// Map of prompt handlers by name
   final Map<String, PromptHandler> _promptHandlers = {};
+
+  /// Registered completion handlers, keyed by `<refType>:<refKey>` where
+  /// refType is `prompt` or `resource` and refKey is the prompt name or
+  /// resource template URI. Plus a fallback `*` handler for any ref.
+  final Map<String, CompletionHandler> _completionHandlers = {};
   
   /// Map of resource templates
   final Map<String, ResourceTemplate> _resourceTemplates = {};
@@ -496,9 +519,38 @@ class Server implements ServerInterface {
     if (isConnected && capabilities.hasPrompts && capabilities.promptsListChanged) {
       _broadcastNotification('notifications/prompts/list_changed', {});
     }
-    
+
     // Emit change event
     _promptsChangedController.add(null);
+  }
+
+  /// Register a completion handler for argument autocompletion (spec
+  /// `completion/complete`).
+  ///
+  /// [refType] is `'prompt'` or `'resource'`. [refKey] is the prompt name
+  /// or resource template URI; pass `'*'` to register a wildcard handler
+  /// that catches any ref of the given type. Pass [refType] = `'*'` for
+  /// a global fallback.
+  ///
+  /// The handler receives the spec `ref` map, the `argument` map
+  /// (`{ name, value }`), and the optional `context.arguments` map of
+  /// previously-resolved arguments.
+  ///
+  /// Returns a map with spec shape `{values, total?, hasMore?}` where
+  /// `values` is `List&lt;String&gt;` clipped to 100 entries.
+  void addCompletion({
+    required String refType,
+    required String refKey,
+    required CompletionHandler handler,
+  }) {
+    final key = refType == '*' ? '*' : '$refType:$refKey';
+    _completionHandlers[key] = handler;
+  }
+
+  /// Remove a completion handler.
+  void removeCompletion({required String refType, required String refKey}) {
+    final key = refType == '*' ? '*' : '$refType:$refKey';
+    _completionHandlers.remove(key);
   }
 
   /// Remove a tool from the server
@@ -1156,6 +1208,10 @@ class Server implements ServerInterface {
         await _handleSamplingCreateMessage(sessionId, request);
         break;
 
+      case 'completion/complete':
+        await _handleCompletionComplete(sessionId, request);
+        break;
+
       // Standard MCP methods
       case 'logging/setLevel':
         await _handleLoggingSetLevel(sessionId, request);
@@ -1538,6 +1594,86 @@ class Server implements ServerInterface {
         'Prompt execution error: $e',
         {'prompt': promptName},
       );
+    }
+  }
+
+  /// Handle completion/complete request (spec): argument autocompletion
+  /// for a registered prompt argument or resource-template argument.
+  Future<void> _handleCompletionComplete(
+      String sessionId, JsonRpcMessage request) async {
+    if (!capabilities.hasCompletions) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
+          'Completions capability not supported');
+      return;
+    }
+
+    final ref = request.params?['ref'];
+    final argument = request.params?['argument'];
+    if (ref is! Map<String, dynamic> || argument is! Map<String, dynamic>) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
+          '`ref` and `argument` are required');
+      return;
+    }
+    final context = request.params?['context'] as Map<String, dynamic>?;
+
+    // Resolve handler key. Prefer the most-specific registered handler:
+    //   1. exact ref (e.g. `prompt:greet` / `resource:file:///{path}`)
+    //   2. wildcard for ref type (`prompt:*` / `resource:*`)
+    //   3. global fallback (`*`)
+    String? key;
+    final refType = ref['type']?.toString() ?? '';
+    if (refType == 'ref/prompt' || refType == 'prompt') {
+      final name = ref['name']?.toString() ?? '';
+      if (_completionHandlers.containsKey('prompt:$name')) {
+        key = 'prompt:$name';
+      } else if (_completionHandlers.containsKey('prompt:*')) {
+        key = 'prompt:*';
+      }
+    } else if (refType == 'ref/resource' || refType == 'resource') {
+      final uri = ref['uri']?.toString() ?? '';
+      if (_completionHandlers.containsKey('resource:$uri')) {
+        key = 'resource:$uri';
+      } else if (_completionHandlers.containsKey('resource:*')) {
+        key = 'resource:*';
+      }
+    }
+    key ??= _completionHandlers.containsKey('*') ? '*' : null;
+
+    if (key == null) {
+      // Spec allows responding with empty completion when no handler.
+      _sendResponse(sessionId, request.id, {
+        'completion': {
+          'values': <String>[],
+          'total': 0,
+          'hasMore': false,
+        }
+      });
+      return;
+    }
+
+    try {
+      final result =
+          await _completionHandlers[key]!(ref, argument, context);
+      // Coerce to spec shape if handler returned a partial map.
+      final completion = result['completion'] is Map
+          ? Map<String, dynamic>.from(result['completion'] as Map)
+          : Map<String, dynamic>.from(result);
+      final values = (completion['values'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const <String>[];
+      // Spec: values MUST have ≤ 100 entries.
+      final clipped = values.length > 100 ? values.sublist(0, 100) : values;
+      _sendResponse(sessionId, request.id, {
+        'completion': {
+          'values': clipped,
+          if (completion['total'] is int) 'total': completion['total'],
+          if (completion['hasMore'] is bool) 'hasMore': completion['hasMore'],
+        }
+      });
+    } catch (e) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.internalError,
+          'Completion error: $e');
     }
   }
 

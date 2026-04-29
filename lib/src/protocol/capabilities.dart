@@ -14,8 +14,12 @@ class ServerCapabilities {
   
   /// Logging support capabilities
   final LoggingCapability? logging;
-  
-  /// Sampling support capabilities  
+
+  /// Completions support (spec: argument autocompletion via
+  /// `completion/complete`).
+  final CompletionsCapability? completions;
+
+  /// Sampling support capabilities
   final SamplingCapability? sampling;
   
   /// Roots support capabilities
@@ -29,6 +33,7 @@ class ServerCapabilities {
     this.resources,
     this.prompts,
     this.logging,
+    this.completions,
     this.sampling,
     this.roots,
     this.progress,
@@ -53,7 +58,11 @@ class ServerCapabilities {
     if (logging != null) {
       result['logging'] = logging!.toJson();
     }
-    
+
+    if (completions != null) {
+      result['completions'] = completions!.toJson();
+    }
+
     if (sampling != null) {
       result['sampling'] = sampling!.toJson();
     }
@@ -74,6 +83,7 @@ class ServerCapabilities {
   bool get hasResources => resources != null;
   bool get hasPrompts => prompts != null;
   bool get hasLogging => logging != null;
+  bool get hasCompletions => completions != null;
   bool get hasSampling => sampling != null;
   bool get hasRoots => roots != null;
   bool get hasProgress => progress != null;
@@ -93,6 +103,7 @@ class ServerCapabilities {
     bool promptsListChanged = false,
     bool sampling = false,
     bool logging = false,
+    bool completions = false,
     bool roots = false,
     bool rootsListChanged = false,
     bool progress = false,
@@ -102,11 +113,21 @@ class ServerCapabilities {
       resources: resources ? ResourcesCapability(listChanged: resourcesListChanged) : null,
       prompts: prompts ? PromptsCapability(listChanged: promptsListChanged) : null,
       logging: logging ? const LoggingCapability() : null,
+      completions: completions ? const CompletionsCapability() : null,
       sampling: sampling ? const SamplingCapability() : null,
       roots: roots ? RootsCapability(listChanged: rootsListChanged) : null,
       progress: progress ? const ProgressCapability() : null,
     );
   }
+}
+
+/// Completions capability — server advertises support for argument
+/// autocompletion via the `completion/complete` request (spec).
+@immutable
+class CompletionsCapability {
+  const CompletionsCapability();
+
+  Map<String, dynamic> toJson() => {};
 }
 
 /// Tools capability
