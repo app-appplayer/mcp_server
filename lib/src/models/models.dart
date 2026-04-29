@@ -907,30 +907,3 @@ class CancelledException implements Exception {
   String toString() => 'CancelledException: $message';
 }
 
-/// Batch request tracker for handling JSON-RPC batch requests
-class BatchRequestTracker {
-  final String batchId;
-  final int totalRequests;
-  final List<Map<String, dynamic>> responses = [];
-  final Set<dynamic> processedIds = {};
-  final DateTime createdAt = DateTime.now();
-  
-  BatchRequestTracker({
-    required this.batchId,
-    required this.totalRequests,
-  });
-  
-  /// Add a response to the batch
-  void addResponse(dynamic id, Map<String, dynamic> response) {
-    if (id != null && !processedIds.contains(id)) {
-      processedIds.add(id);
-      responses.add(response);
-    }
-  }
-  
-  /// Check if all requests have been processed
-  bool get isComplete => responses.length >= totalRequests;
-  
-  /// Get the batch response (array of responses)
-  List<Map<String, dynamic>> getBatchResponse() => List.unmodifiable(responses);
-}

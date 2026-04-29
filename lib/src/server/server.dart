@@ -126,8 +126,6 @@ class Server implements ServerInterface {
   /// Counter used to mint unique outbound request ids.
   int _outboundRequestSeq = 0;
   
-  // Batch request tracking
-  final Map<String, BatchRequestTracker> _batchRequests = {};
 
   /// Server start time for health metrics
   final DateTime _startTime = DateTime.now();
@@ -847,14 +845,18 @@ class Server implements ServerInterface {
     _resourceUnsubscribedController.close();
   }
 
-  /// Handle incoming messages from the transport
+  /// Handle incoming messages from the transport.
+  ///
+  /// JSON-RPC batching was removed in MCP 2025-06-18 (PR #416). A batch
+  /// array on the wire is treated as an invalid request — clients must
+  /// send individual messages.
   void _handleMessage(String sessionId, dynamic rawMessage) {
     try {
       final parsed = rawMessage is String ? jsonDecode(rawMessage) : rawMessage;
-      
-      // Check if it's a batch request (array of requests)
+
       if (parsed is List) {
-        _handleBatchRequest(sessionId, parsed);
+        _sendErrorResponse(sessionId, null, ErrorCode.invalidRequest,
+            'JSON-RPC batching is not supported (removed in MCP 2025-06-18)');
       } else if (parsed is Map<String, dynamic>) {
         final message = JsonRpcMessage.fromJson(parsed);
         message.sessionId = sessionId; // Attach session ID
@@ -866,107 +868,6 @@ class Server implements ServerInterface {
       _logger.error('Parse error: $e');
       _sendErrorResponse(sessionId, null, ErrorCode.parseError, 'Parse error: $e');
     }
-  }
-  
-  /// Handle batch requests
-  Future<void> _handleBatchRequest(String sessionId, List<dynamic> batch) async {
-    if (batch.isEmpty) {
-      _sendErrorResponse(sessionId, null, ErrorCode.invalidRequest, 'Empty batch request');
-      return;
-    }
-    
-    final batchId = Uuid().v4();
-    final validRequests = <JsonRpcMessage>[];
-    final immediateResponses = <Map<String, dynamic>>[];
-    
-    // First pass: validate and parse all requests
-    for (final item in batch) {
-      if (item is! Map<String, dynamic>) {
-        immediateResponses.add({
-          'jsonrpc': '2.0',
-          'error': {
-            'code': ErrorCode.invalidRequest,
-            'message': 'Invalid request in batch',
-          },
-          'id': null,
-        });
-        continue;
-      }
-      
-      try {
-        final message = JsonRpcMessage.fromJson(item);
-        message.sessionId = sessionId;
-        
-        // Tag with batch ID for tracking
-        if (message.id != null) {
-          message.batchId = batchId;
-        }
-        
-        validRequests.add(message);
-      } catch (e) {
-        final id = item['id'];
-        if (id != null) {
-          immediateResponses.add({
-            'jsonrpc': '2.0',
-            'error': {
-              'code': ErrorCode.parseError,
-              'message': 'Parse error: $e',
-            },
-            'id': id,
-          });
-        }
-      }
-    }
-    
-    // Calculate expected responses (non-notification requests)
-    final expectedResponses = validRequests.where((m) => !m.isNotification).length;
-    
-    if (expectedResponses > 0) {
-      // Create batch tracker
-      final tracker = BatchRequestTracker(
-        batchId: batchId,
-        totalRequests: expectedResponses,
-      );
-      
-      // Add immediate error responses
-      for (final response in immediateResponses) {
-        if (response['id'] != null) {
-          tracker.addResponse(response['id'], response);
-        }
-      }
-      
-      _batchRequests[batchId] = tracker;
-      
-      // Process all valid requests
-      for (final message in validRequests) {
-        _messageController.add(message);
-      }
-      
-      // Wait for batch completion with timeout
-      final timeout = Duration(seconds: 30);
-      final startTime = DateTime.now();
-      
-      while (!tracker.isComplete && 
-             DateTime.now().difference(startTime) < timeout) {
-        await Future.delayed(Duration(milliseconds: 10));
-      }
-      
-      // Send batch response
-      final batchResponse = tracker.getBatchResponse();
-      if (batchResponse.isNotEmpty) {
-        _sendBatchResponse(sessionId, batchResponse);
-      }
-      
-      // Clean up
-      _batchRequests.remove(batchId);
-    } else {
-      // Only notifications or errors, send immediate response if any
-      if (immediateResponses.isNotEmpty) {
-        _sendBatchResponse(sessionId, immediateResponses);
-      }
-    }
-    
-    _logger.debug('Batch request processed: $batchId with ${batch.length} items');
   }
 
   /// Process a JSON-RPC message
@@ -997,7 +898,7 @@ class Server implements ServerInterface {
         _handleOutboundResponse(message);
       } else {
         incrementMetric('messages.invalid');
-        _sendErrorResponse(sessionId, message.id, ErrorCode.invalidRequest, 'Invalid request', null, message.batchId);
+        _sendErrorResponse(sessionId, message.id, ErrorCode.invalidRequest, 'Invalid request');
       }
 
       incrementMetric('messages.success');
@@ -1018,8 +919,6 @@ class Server implements ServerInterface {
           message.id,
           ErrorCode.internalError,
           'Internal server error: ${e.toString()}',
-          null,
-          message.batchId
       );
     } finally {
       stopTimer(timerName);
@@ -1102,8 +1001,6 @@ class Server implements ServerInterface {
           request.id,
           ErrorCode.invalidRequest,
           'Session not initialized yet. Send initialize request first.',
-          null,
-          request.batchId
       );
       return;
     }
@@ -1117,8 +1014,6 @@ class Server implements ServerInterface {
           request.id,
           ErrorCode.unauthorized,
           authResult.error ?? 'Authentication required',
-          null,
-          request.batchId
         );
         return;
       }
@@ -1154,7 +1049,6 @@ class Server implements ServerInterface {
             'retryAfter': rateLimitResult.retryAfter?.inSeconds ?? 0,
             'resetTime': rateLimitResult.resetTime.toIso8601String(),
           },
-          request.batchId
         );
         return;
       }
@@ -1808,48 +1702,31 @@ class Server implements ServerInterface {
     return true;
   }
 
-  /// Send a JSON-RPC response to specific session
-  void _sendResponse(String sessionId, dynamic id, dynamic result, {String? batchId}) {
-    _logger.debug('🚀 _sendResponse called - sessionId: $sessionId, id: $id (type: ${id.runtimeType})');
-    
+  /// Send a JSON-RPC response to specific session.
+  void _sendResponse(String sessionId, dynamic id, dynamic result) {
     final session = _sessions[sessionId];
     if (session == null) {
-      _logger.error('❌ Attempted to send response to non-existent session: $sessionId');
-      _logger.debug('Available sessions: ${_sessions.keys.toList()}');
+      _logger.error('Attempted to send response to non-existent session: $sessionId');
       return;
     }
-    
-    _logger.debug('✅ Session found, creating response...');
 
     final response = {
       'jsonrpc': '2.0',
       'id': id,
       'result': result,
     };
-
-    // Check if this is part of a batch request
-    if (batchId != null) {
-      final tracker = _batchRequests[batchId];
-      if (tracker != null) {
-        tracker.addResponse(id, response);
-        return; // Don't send individual response for batch items
-      }
-    }
-
-    _logger.debug('📤 Calling transport.send() with response: ${jsonEncode(response)}');
     session.transport.send(response);
-    _logger.debug('✅ transport.send() completed');
   }
 
-  /// Send a JSON-RPC error response to specific session
-  void _sendErrorResponse(String sessionId, dynamic id, int code, String message, [Map<String, dynamic>? data, String? batchId]) {
+  /// Send a JSON-RPC error response to specific session.
+  void _sendErrorResponse(String sessionId, dynamic id, int code, String message,
+      [Map<String, dynamic>? data]) {
     final session = _sessions[sessionId];
     if (session == null) {
       _logger.error('Attempted to send error to non-existent session: $sessionId');
       return;
     }
 
-    // Log the error
     _logger.error('Sending error response: $code - $message');
     if (data != null) {
       _logger.debug('Error data: $data');
@@ -1868,36 +1745,10 @@ class Server implements ServerInterface {
       response['error']['data'] = data;
     }
 
-    // Check if this is part of a batch request
-    if (batchId != null) {
-      final tracker = _batchRequests[batchId];
-      if (tracker != null) {
-        tracker.addResponse(id, response);
-        return; // Don't send individual response for batch items
-      }
-    }
-
     try {
       session.transport.send(response);
     } catch (e) {
       _logger.error('Failed to send error response: $e');
-      // Instead of crashing, just log the error
-    }
-  }
-  
-  /// Send a batch response (array of responses)
-  void _sendBatchResponse(String sessionId, List<Map<String, dynamic>> responses) {
-    final session = _sessions[sessionId];
-    if (session == null) {
-      _logger.error('Attempted to send batch response to non-existent session: $sessionId');
-      return;
-    }
-    
-    try {
-      session.transport.send(responses);
-      _logger.debug('Sent batch response with ${responses.length} items');
-    } catch (e) {
-      _logger.error('Failed to send batch response: $e');
     }
   }
 
@@ -2286,7 +2137,6 @@ class JsonRpcMessage {
   final dynamic result;
   final Map<String, dynamic>? error;
   String sessionId = '';
-  String? batchId;
 
   bool get isNotification => id == null && method != null;
   bool get isRequest => id != null && method != null;
@@ -2770,8 +2620,7 @@ extension OAuthServerMethods on Server {
       params: modifiedParams,
     );
     modifiedRequest.sessionId = request.sessionId;
-    modifiedRequest.batchId = request.batchId;
-    
+
     await _handleOAuthToken(sessionId, modifiedRequest);
   }
   
