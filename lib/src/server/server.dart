@@ -428,6 +428,10 @@ class Server implements ServerInterface {
     required String description,
     required Map<String, dynamic> inputSchema,
     required ToolHandler handler,
+    String? title,
+    Map<String, dynamic>? outputSchema,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   }) {
     _logger.debug('Adding tool: $name');
 
@@ -438,8 +442,12 @@ class Server implements ServerInterface {
 
     final tool = Tool(
       name: name,
+      title: title,
       description: description,
       inputSchema: inputSchema,
+      outputSchema: outputSchema,
+      icons: icons,
+      meta: meta,
     );
 
     _tools[name] = tool;
@@ -469,6 +477,9 @@ class Server implements ServerInterface {
     required String mimeType,
     Map<String, dynamic>? uriTemplate,
     required ResourceHandler handler,
+    String? title,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   }) {
     if (_resources.containsKey(uri)) {
       throw McpError('Resource with URI "$uri" already exists');
@@ -482,9 +493,12 @@ class Server implements ServerInterface {
     final resource = Resource(
       uri: uri,
       name: name,
+      title: title,
       description: description,
       mimeType: mimeType,
       uriTemplate: uriTemplate,
+      icons: icons,
+      meta: meta,
     );
 
     _resources[uri] = resource;
@@ -506,6 +520,9 @@ class Server implements ServerInterface {
     required String description,
     required List<PromptArgument> arguments,
     required PromptHandler handler,
+    String? title,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   }) {
     if (_prompts.containsKey(name)) {
       throw McpError('Prompt with name "$name" already exists');
@@ -513,8 +530,11 @@ class Server implements ServerInterface {
 
     final prompt = Prompt(
       name: name,
+      title: title,
       description: description,
       arguments: arguments,
+      icons: icons,
+      meta: meta,
     );
 
     _prompts[name] = prompt;
@@ -2231,15 +2251,22 @@ abstract class ServerInterface {
   /// Get server health information
   ServerHealth getHealth();
 
-  /// Add a tool to the server
+  /// Add a tool to the server. Spec 2025-06-18+ optional fields:
+  /// [title] (display name), [outputSchema] (structured result schema).
+  /// Spec 2025-11-25+: [icons]. [meta] is the spec `_meta` map.
   void addTool({
     required String name,
     required String description,
     required Map<String, dynamic> inputSchema,
     required ToolHandler handler,
+    String? title,
+    Map<String, dynamic>? outputSchema,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   });
 
-  /// Add a resource to the server
+  /// Add a resource to the server. Spec 2025-06-18+ optional fields:
+  /// [title]. Spec 2025-11-25+: [icons]. [meta] is the spec `_meta` map.
   void addResource({
     required String uri,
     required String name,
@@ -2247,14 +2274,21 @@ abstract class ServerInterface {
     required String mimeType,
     Map<String, dynamic>? uriTemplate,
     required ResourceHandler handler,
+    String? title,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   });
 
-  /// Add a prompt to the server
+  /// Add a prompt to the server. Spec 2025-06-18+ optional [title].
+  /// Spec 2025-11-25+: [icons]. [meta] is the spec `_meta` map.
   void addPrompt({
     required String name,
     required String description,
     required List<PromptArgument> arguments,
     required PromptHandler handler,
+    String? title,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
   });
 
   /// Remove a tool from the server
