@@ -85,6 +85,15 @@ class Server implements ServerInterface {
   /// Pending operations for cancellation support
   final Map<String, PendingOperation> _pendingOperations = {};
 
+  /// Optional listener for client → server `notifications/progress`.
+  /// Signature: (sessionId, params) where params follows the spec
+  /// `{ progressToken, progress, total?, message? }`.
+  void Function(String sessionId, Map<String, dynamic> params)? _onClientProgress;
+  set onClientProgress(
+      void Function(String sessionId, Map<String, dynamic> params)? handler) {
+    _onClientProgress = handler;
+  }
+
   // Pending sampling requests tracker
   final Map<String, Completer<Map<String, dynamic>>> _pendingSamplingRequests = {};
   
@@ -972,8 +981,24 @@ class Server implements ServerInterface {
         sendLog(McpLogLevel.info, 'Client initialized successfully');
         break;
 
-      case 'client/ready':
-        _logger.debug('Client ready notification received');
+      case 'notifications/cancelled':
+        // Spec: client cancels an in-flight request. params: { requestId, reason? }.
+        final cancelRequestId = notification.params?['requestId']?.toString();
+        if (cancelRequestId != null) {
+          for (final op in _pendingOperations.values) {
+            if (op.requestId == cancelRequestId && op.sessionId == sessionId) {
+              op.isCancelled = true;
+              break;
+            }
+          }
+        }
+        break;
+
+      case 'notifications/progress':
+        // Spec: client reports progress on an in-flight server-initiated
+        // request. params: { progressToken, progress, total?, message? }.
+        // Forwarded to any registered progress listener; default no-op.
+        _onClientProgress?.call(sessionId, notification.params ?? const {});
         break;
 
       case 'notifications/roots/list_changed':
@@ -1127,33 +1152,8 @@ class Server implements ServerInterface {
         await _handlePromptGet(sessionId, request);
         break;
 
-      case 'cancel':
-        await _handleCancelOperation(sessionId, request);
-        break;
-
-      case 'health/check':
-        await _handleHealthCheck(sessionId, request);
-        break;
-
       case 'sampling/createMessage':
         await _handleSamplingCreateMessage(sessionId, request);
-        break;
-
-      // OAuth 2.1 authentication methods (2025-03-26)
-      case 'auth/authorize':
-        await _handleOAuthAuthorize(sessionId, request);
-        break;
-        
-      case 'auth/token':
-        await _handleOAuthToken(sessionId, request);
-        break;
-        
-      case 'auth/refresh':
-        await _handleOAuthRefresh(sessionId, request);
-        break;
-        
-      case 'auth/revoke':
-        await _handleOAuthRevoke(sessionId, request);
         break;
 
       // Standard MCP methods
@@ -1539,36 +1539,6 @@ class Server implements ServerInterface {
         {'prompt': promptName},
       );
     }
-  }
-
-  /// Handle cancel operation request
-  Future<void> _handleCancelOperation(String sessionId, JsonRpcMessage request) async {
-    final operationId = request.params?['id'];
-    if (operationId == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'Operation ID parameter is required');
-      return;
-    }
-
-    final operation = _pendingOperations[operationId];
-    if (operation == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 'Operation not found: $operationId');
-      return;
-    }
-
-    // Check session ownership
-    if (operation.sessionId != sessionId) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.unauthorized, 'Unauthorized to cancel this operation');
-      return;
-    }
-
-    operation.isCancelled = true;
-    _sendResponse(sessionId, request.id, {'cancelled': true});
-  }
-
-  /// Handle health check request
-  Future<void> _handleHealthCheck(String sessionId, JsonRpcMessage request) async {
-    final health = getHealth();
-    _sendResponse(sessionId, request.id, health.toJson());
   }
 
   /// Handle sampling/createMessage request
@@ -2241,6 +2211,10 @@ extension OAuthServerMethods on Server {
   }
   
   /// Handle OAuth authorization request
+  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
+  // Kept until the HTTP-level swap so the OAuth grant helpers below remain
+  // reachable by tests during the transition.
+  // ignore: unused_element
   Future<void> _handleOAuthAuthorize(String sessionId, JsonRpcMessage request) async {
     final responseType = request.params?['response_type'] as String?;
     final clientId = request.params?['client_id'] as String?;
@@ -2517,6 +2491,8 @@ extension OAuthServerMethods on Server {
   }
   
   /// Handle OAuth revoke request
+  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
+  // ignore: unused_element
   Future<void> _handleOAuthRevoke(String sessionId, JsonRpcMessage request) async {
     final token = request.params?['token'] as String?;
     // Note: token_type_hint parameter is ignored in this implementation
@@ -2560,6 +2536,8 @@ extension OAuthServerMethods on Server {
   }
   
   /// Handle OAuth refresh request (alias for refresh token grant)
+  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
+  // ignore: unused_element
   Future<void> _handleOAuthRefresh(String sessionId, JsonRpcMessage request) async {
     // Set grant_type if not provided
     final modifiedParams = Map<String, dynamic>.from(request.params ?? {});
