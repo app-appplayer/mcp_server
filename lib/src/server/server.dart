@@ -413,7 +413,7 @@ class Server implements ServerInterface {
 
     // Notify clients about tool changes if connected and supported
     if (isConnected && capabilities.hasTools && capabilities.toolsListChanged) {
-      _broadcastNotification('tools/listChanged', {});
+      _broadcastNotification('notifications/tools/list_changed', {});
     }
     
     // Emit change event
@@ -455,7 +455,7 @@ class Server implements ServerInterface {
 
     // Notify clients about resource changes if connected and supported
     if (isConnected && capabilities.hasResources && capabilities.resourcesListChanged) {
-      _broadcastNotification('resources/listChanged', {});
+      _broadcastNotification('notifications/resources/list_changed', {});
     }
     
     // Emit change event
@@ -485,7 +485,7 @@ class Server implements ServerInterface {
 
     // Notify clients about prompt changes if connected and supported
     if (isConnected && capabilities.hasPrompts && capabilities.promptsListChanged) {
-      _broadcastNotification('prompts/listChanged', {});
+      _broadcastNotification('notifications/prompts/list_changed', {});
     }
     
     // Emit change event
@@ -504,7 +504,7 @@ class Server implements ServerInterface {
 
     // Notify clients about tool changes if connected and supported
     if (isConnected && capabilities.hasTools && capabilities.toolsListChanged) {
-      _broadcastNotification('tools/listChanged', {});
+      _broadcastNotification('notifications/tools/list_changed', {});
     }
     
     // Emit change event
@@ -529,7 +529,7 @@ class Server implements ServerInterface {
 
     // Notify clients about resource changes if connected and supported
     if (isConnected && capabilities.hasResources && capabilities.resourcesListChanged) {
-      _broadcastNotification('resources/listChanged', {});
+      _broadcastNotification('notifications/resources/list_changed', {});
     }
     
     // Emit change event
@@ -548,7 +548,7 @@ class Server implements ServerInterface {
 
     // Notify clients about prompt changes if connected and supported
     if (isConnected && capabilities.hasPrompts && capabilities.promptsListChanged) {
-      _broadcastNotification('prompts/listChanged', {});
+      _broadcastNotification('notifications/prompts/list_changed', {});
     }
     
     // Emit change event
