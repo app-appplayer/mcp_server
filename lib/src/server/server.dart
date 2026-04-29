@@ -158,6 +158,7 @@ class Server implements ServerInterface {
   
   /// Authentication middleware
   AuthMiddleware? _authMiddleware;
+  _ProtectedResourceMetadata? _protectedResource;
   
   /// Metrics collector
   late final MetricsCollector _metricsCollector;
@@ -2128,6 +2129,24 @@ class McpError implements Exception {
       code != null ? 'McpError($code): $message' : 'McpError: $message';
 }
 
+/// Internal: backing record for [Server.protectedResourceMetadata].
+/// Spec: RFC 9728 OAuth 2.0 Protected Resource Metadata.
+class _ProtectedResourceMetadata {
+  final String resource;
+  final List<String> authorizationServers;
+  final List<String>? scopesSupported;
+  final List<String>? bearerMethodsSupported;
+  final String? resourceDocumentation;
+
+  const _ProtectedResourceMetadata({
+    required this.resource,
+    required this.authorizationServers,
+    this.scopesSupported,
+    this.bearerMethodsSupported,
+    this.resourceDocumentation,
+  });
+}
+
 /// JSON-RPC message
 class JsonRpcMessage {
   final String jsonrpc;
@@ -2256,6 +2275,58 @@ extension OAuthServerMethods on Server {
   
   /// Check if authentication is enabled
   bool get isAuthenticationEnabled => _authMiddleware != null;
+
+  /// Spec 2025-06-18 (RFC 9728): metadata for the server as an OAuth 2.0
+  /// Protected Resource. Streamable HTTP transports SHOULD expose this at
+  /// `/.well-known/oauth-protected-resource`. Returns `null` when
+  /// authentication is not enabled.
+  ///
+  /// Set the source-of-truth fields via [configureProtectedResource].
+  /// The metadata at minimum names the resource and the authorization
+  /// servers that issue tokens for it. RFC 8707 (Resource Indicators)
+  /// requires clients to send `resource: <this resource URI>` when
+  /// requesting tokens, so the resource URI is mandatory.
+  Map<String, dynamic>? get protectedResourceMetadata {
+    if (_authMiddleware == null || _protectedResource == null) return null;
+    final m = _protectedResource!;
+    return <String, dynamic>{
+      'resource': m.resource,
+      'authorization_servers': m.authorizationServers,
+      if (m.scopesSupported != null) 'scopes_supported': m.scopesSupported,
+      if (m.bearerMethodsSupported != null)
+        'bearer_methods_supported': m.bearerMethodsSupported,
+      if (m.resourceDocumentation != null)
+        'resource_documentation': m.resourceDocumentation,
+    };
+  }
+
+  /// Configure the OAuth Protected Resource metadata served at
+  /// `/.well-known/oauth-protected-resource` (RFC 9728).
+  ///
+  /// [resource] is the canonical resource URI clients pass as the
+  /// `resource` parameter (RFC 8707) when requesting tokens.
+  /// [authorizationServers] lists the AS issuer URLs that mint tokens
+  /// valid for this resource. 2025-11-25 also recognises OIDC
+  /// `.well-known/openid-configuration` discovery on those AS issuers.
+  void configureProtectedResource({
+    required String resource,
+    required List<String> authorizationServers,
+    List<String>? scopesSupported,
+    List<String>? bearerMethodsSupported,
+    String? resourceDocumentation,
+  }) {
+    _protectedResource = _ProtectedResourceMetadata(
+      resource: resource,
+      authorizationServers: List.unmodifiable(authorizationServers),
+      scopesSupported: scopesSupported == null
+          ? null
+          : List.unmodifiable(scopesSupported),
+      bearerMethodsSupported: bearerMethodsSupported == null
+          ? null
+          : List.unmodifiable(bearerMethodsSupported),
+      resourceDocumentation: resourceDocumentation,
+    );
+  }
   
   /// Authenticate a request using the configured auth middleware
   Future<AuthResult?> _authenticateRequest(String sessionId, JsonRpcMessage request) async {
@@ -2280,356 +2351,6 @@ extension OAuthServerMethods on Server {
     );
   }
   
-  /// Handle OAuth authorization request
-  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
-  // Kept until the HTTP-level swap so the OAuth grant helpers below remain
-  // reachable by tests during the transition.
-  // ignore: unused_element
-  Future<void> _handleOAuthAuthorize(String sessionId, JsonRpcMessage request) async {
-    final responseType = request.params?['response_type'] as String?;
-    final clientId = request.params?['client_id'] as String?;
-    final redirectUri = request.params?['redirect_uri'] as String?;
-    final scope = request.params?['scope'] as String?;
-    final state = request.params?['state'] as String?;
-    final codeChallenge = request.params?['code_challenge'] as String?;
-    final codeChallengeMethod = request.params?['code_challenge_method'] as String?;
-    
-    if (responseType != 'code') {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'Only authorization code flow is supported');
-      return;
-    }
-    
-    if (clientId == null || redirectUri == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'client_id and redirect_uri are required');
-      return;
-    }
-    
-    // Generate authorization code
-    final authCode = const Uuid().v4();
-    final scopes = scope?.split(' ') ?? [];
-    
-    // Store authorization code with expiration (10 minutes)
-    final codeData = {
-      'client_id': clientId,
-      'redirect_uri': redirectUri,
-      'scope': scopes,
-      'code_challenge': codeChallenge,
-      'code_challenge_method': codeChallengeMethod,
-      'expires_at': DateTime.now().add(Duration(minutes: 10)).millisecondsSinceEpoch,
-    };
-    
-    // In a real implementation, you would store this securely
-    // For demo purposes, we'll store it in the session
-    final session = _sessions[sessionId];
-    if (session != null) {
-      session.pendingAuthCodes ??= {};
-      session.pendingAuthCodes![authCode] = codeData;
-    }
-    
-    final response = {
-      'authorization_code': authCode,
-      'redirect_uri': redirectUri,
-      'state': state,
-      'expires_in': 600, // 10 minutes
-    };
-    
-    _sendResponse(sessionId, request.id, response);
-  }
-  
-  /// Handle OAuth token request
-  Future<void> _handleOAuthToken(String sessionId, JsonRpcMessage request) async {
-    final grantType = request.params?['grant_type'] as String?;
-    
-    switch (grantType) {
-      case 'authorization_code':
-        await _handleAuthorizationCodeGrant(sessionId, request);
-        break;
-      case 'client_credentials':
-        await _handleClientCredentialsGrant(sessionId, request);
-        break;
-      case 'refresh_token':
-        await _handleRefreshTokenGrant(sessionId, request);
-        break;
-      default:
-        _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-            'Unsupported grant type: $grantType');
-    }
-  }
-  
-  /// Handle authorization code grant
-  Future<void> _handleAuthorizationCodeGrant(String sessionId, JsonRpcMessage request) async {
-    final code = request.params?['code'] as String?;
-    final clientId = request.params?['client_id'] as String?;
-    // clientSecret is not used in this implementation
-    final redirectUri = request.params?['redirect_uri'] as String?;
-    final codeVerifier = request.params?['code_verifier'] as String?;
-    
-    if (code == null || clientId == null || redirectUri == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'code, client_id, and redirect_uri are required');
-      return;
-    }
-    
-    // Find the session with this authorization code
-    Map<String, dynamic>? codeData;
-    for (final session in _sessions.values) {
-      if (session.pendingAuthCodes?.containsKey(code) == true) {
-        codeData = session.pendingAuthCodes![code];
-        session.pendingAuthCodes!.remove(code); // Use code only once
-        break;
-      }
-    }
-    
-    if (codeData == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'Invalid or expired authorization code');
-      return;
-    }
-    
-    // Verify code data
-    if (codeData['client_id'] != clientId || 
-        codeData['redirect_uri'] != redirectUri) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'Code verification failed');
-      return;
-    }
-    
-    // Check expiration
-    final expiresAt = codeData['expires_at'] as int?;
-    if (expiresAt != null && DateTime.now().millisecondsSinceEpoch > expiresAt) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'Authorization code expired');
-      return;
-    }
-    
-    // Verify PKCE if provided
-    if (codeData['code_challenge'] != null) {
-      if (codeVerifier == null) {
-        _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-            'code_verifier required for PKCE');
-        return;
-      }
-      
-      // Verify code challenge (simplified verification)
-      // In production, use proper SHA256 hashing
-      final method = codeData['code_challenge_method'] as String? ?? 'S256';
-      if (method == 'S256') {
-        // Simplified verification - in production use crypto library
-        final expectedChallenge = codeData['code_challenge'];
-        if (expectedChallenge != codeVerifier) {
-          _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-              'Invalid code verifier');
-          return;
-        }
-      }
-    }
-    
-    // Generate tokens
-    final accessToken = const Uuid().v4();
-    final refreshToken = const Uuid().v4();
-    final scopes = (codeData['scope'] as List<dynamic>?)?.cast<String>() ?? [];
-    
-    // Store token data
-    final session = _sessions[sessionId];
-    if (session != null) {
-      session.accessTokens ??= {};
-      session.accessTokens![accessToken] = {
-        'client_id': clientId,
-        'scope': scopes,
-        'expires_at': DateTime.now().add(Duration(hours: 1)).millisecondsSinceEpoch,
-        'refresh_token': refreshToken,
-      };
-    }
-    
-    final response = {
-      'access_token': accessToken,
-      'token_type': 'Bearer',
-      'expires_in': 3600,
-      'refresh_token': refreshToken,
-      'scope': scopes.join(' '),
-    };
-    
-    _sendResponse(sessionId, request.id, response);
-  }
-  
-  /// Handle client credentials grant
-  Future<void> _handleClientCredentialsGrant(String sessionId, JsonRpcMessage request) async {
-    final clientId = request.params?['client_id'] as String?;
-    final clientSecret = request.params?['client_secret'] as String?;
-    final scope = request.params?['scope'] as String?;
-    
-    if (clientId == null || clientSecret == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'client_id and client_secret are required');
-      return;
-    }
-    
-    // Validate client credentials (simplified)
-    // In production, verify against secure client registry
-    if (!_validateClientCredentials(clientId, clientSecret)) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.unauthorized, 
-          'Invalid client credentials');
-      return;
-    }
-    
-    // Generate access token
-    final accessToken = const Uuid().v4();
-    final scopes = scope?.split(' ') ?? [];
-    
-    // Store token data
-    final session = _sessions[sessionId];
-    if (session != null) {
-      session.accessTokens ??= {};
-      session.accessTokens![accessToken] = {
-        'client_id': clientId,
-        'scope': scopes,
-        'expires_at': DateTime.now().add(Duration(hours: 1)).millisecondsSinceEpoch,
-        'grant_type': 'client_credentials',
-      };
-    }
-    
-    final response = {
-      'access_token': accessToken,
-      'token_type': 'Bearer',
-      'expires_in': 3600,
-      'scope': scopes.join(' '),
-    };
-    
-    _sendResponse(sessionId, request.id, response);
-  }
-  
-  /// Handle refresh token grant
-  Future<void> _handleRefreshTokenGrant(String sessionId, JsonRpcMessage request) async {
-    final refreshToken = request.params?['refresh_token'] as String?;
-    // clientId and clientSecret are not used in this implementation
-    
-    if (refreshToken == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'refresh_token is required');
-      return;
-    }
-    
-    // Find token data by refresh token
-    Map<String, dynamic>? tokenData;
-    String? oldAccessToken;
-    
-    for (final session in _sessions.values) {
-      if (session.accessTokens != null) {
-        for (final entry in session.accessTokens!.entries) {
-          if (entry.value['refresh_token'] == refreshToken) {
-            tokenData = entry.value;
-            oldAccessToken = entry.key;
-            break;
-          }
-        }
-      }
-      if (tokenData != null) break;
-    }
-    
-    if (tokenData == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'Invalid refresh token');
-      return;
-    }
-    
-    // Generate new access token
-    final newAccessToken = const Uuid().v4();
-    final scopes = (tokenData['scope'] as List<dynamic>?)?.cast<String>() ?? [];
-    
-    // Update token data
-    final session = _sessions[sessionId];
-    if (session != null && oldAccessToken != null) {
-      session.accessTokens!.remove(oldAccessToken);
-      session.accessTokens![newAccessToken] = {
-        'client_id': tokenData['client_id'],
-        'scope': scopes,
-        'expires_at': DateTime.now().add(Duration(hours: 1)).millisecondsSinceEpoch,
-        'refresh_token': refreshToken,
-      };
-    }
-    
-    final response = {
-      'access_token': newAccessToken,
-      'token_type': 'Bearer',
-      'expires_in': 3600,
-      'scope': scopes.join(' '),
-    };
-    
-    _sendResponse(sessionId, request.id, response);
-  }
-  
-  /// Handle OAuth revoke request
-  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
-  // ignore: unused_element
-  Future<void> _handleOAuthRevoke(String sessionId, JsonRpcMessage request) async {
-    final token = request.params?['token'] as String?;
-    // Note: token_type_hint parameter is ignored in this implementation
-    
-    if (token == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams, 
-          'token is required');
-      return;
-    }
-    
-    // Find and revoke the token
-    bool tokenRevoked = false;
-    
-    for (final session in _sessions.values) {
-      // Check access tokens
-      if (session.accessTokens?.remove(token) != null) {
-        tokenRevoked = true;
-        break;
-      }
-      
-      // Check refresh tokens
-      if (session.accessTokens != null) {
-        final toRemove = <String>[];
-        for (final entry in session.accessTokens!.entries) {
-          if (entry.value['refresh_token'] == token) {
-            toRemove.add(entry.key);
-          }
-        }
-        for (final key in toRemove) {
-          session.accessTokens!.remove(key);
-          tokenRevoked = true;
-        }
-      }
-    }
-    
-    // Log token revocation status for debugging
-    _logger.fine('Token revocation attempted: ${tokenRevoked ? "success" : "not found"}');
-    
-    // Always return success for security (don't reveal token validity)
-    _sendResponse(sessionId, request.id, {'revoked': true});
-  }
-  
-  /// Handle OAuth refresh request (alias for refresh token grant)
-  // TODO(2.0 phase 8): replaced by HTTP OAuth Resource Server (RFC 9728).
-  // ignore: unused_element
-  Future<void> _handleOAuthRefresh(String sessionId, JsonRpcMessage request) async {
-    // Set grant_type if not provided
-    final modifiedParams = Map<String, dynamic>.from(request.params ?? {});
-    modifiedParams['grant_type'] = 'refresh_token';
-    
-    final modifiedRequest = JsonRpcMessage(
-      jsonrpc: request.jsonrpc,
-      id: request.id,
-      method: 'auth/token',
-      params: modifiedParams,
-    );
-    modifiedRequest.sessionId = request.sessionId;
-
-    await _handleOAuthToken(sessionId, modifiedRequest);
-  }
-  
-  /// Validate client credentials (simplified implementation)
-  bool _validateClientCredentials(String clientId, String clientSecret) {
-    // In production, this would check against a secure client registry
-    // For demo purposes, accept any non-empty credentials
-    return clientId.isNotEmpty && clientSecret.isNotEmpty;
-  }
 
   /// Handle logging/setLevel request
   Future<void> _handleLoggingSetLevel(String sessionId, JsonRpcMessage request) async {
