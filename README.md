@@ -18,15 +18,18 @@ A Dart plugin for implementing [Model Context Protocol (MCP)](https://modelconte
   - Server-Sent Events (SSE) for HTTP-based communication
 - Cross-platform support: Android, iOS, web, Linux, Windows, macOS
 
-## Protocol Version
+## Protocol Versions
 
-This package implements the Model Context Protocol (MCP) specification versions `2024-11-05` and `2025-03-26`.
+Implements the Model Context Protocol specification across **four** revisions:
 
-The protocol version is crucial for ensuring compatibility between MCP clients and servers. Each release of this package may support different protocol versions, so it's important to:
+| Version | Notes |
+|---|---|
+| `2024-11-05` | Original; JSON-RPC batching available |
+| `2025-03-26` | Earlier 2025 revision; JSON-RPC batching available |
+| `2025-06-18` | Adds elicitation, structured tool output, resource links, OAuth Resource Server, MCP-Protocol-Version header. Removes JSON-RPC batching |
+| `2025-11-25` | Adds icons, sampling tool calling (`tools` / `toolChoice`), URL-mode elicitation, OIDC Discovery, Client ID Metadata Documents |
 
-- Check the CHANGELOG.md for protocol version updates
-- Ensure client and server protocol versions are compatible
-- Stay updated with the latest MCP specification
+The negotiated version determines which features are advertised and which dispatch paths are taken. `McpProtocol.supportsBatching(v)` / `supportsElicitation(v)` / `supportsStructuredToolOutput(v)` / `supportsIconsAndSamplingTools(v)` / `requiresProtocolHeader(v)` are runtime gates server logic uses to branch.
 
 ## Getting Started
 

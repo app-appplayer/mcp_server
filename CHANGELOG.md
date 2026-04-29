@@ -1,3 +1,36 @@
+## [2.0.0] - upcoming - MCP spec compliance + 2025-11-25 alignment
+
+Big-Bang spec normalization. Supports protocol revisions 2024-11-05, 2025-03-26, 2025-06-18, and 2025-11-25 with per-version capability gating.
+
+### Breaking
+- **Sampling direction fixed.** Server now initiates `sampling/createMessage` outbound to the client (per spec). The previous inbound handler (broken — it forwarded the request back to the client through a notification) is removed. Use `Server.requestClientSampling(sessionId, params)` from tool handlers.
+- **Roots direction fixed.** Server requests roots from the client via `Server.requestClientRoots(sessionId)`. The spurious server-side `notifications/roots/list_changed` broadcasts in `addRoot` / `removeRoot` are removed; that notification is client → server only per spec.
+- **`list_changed` notifications use the standard names.** `tools/listChanged` → `notifications/tools/list_changed`; same for resources and prompts. Existing clients that listened on the legacy names will not see updates.
+- **Non-standard JSON-RPC methods removed.** `cancel` (request) is replaced by `notifications/cancelled` (notification). `client/ready`, `health/check`, `sampling/response`, and `auth/authorize` / `auth/token` / `auth/refresh` / `auth/revoke` are deleted. OAuth is now an HTTP-layer Resource Server (RFC 9728) — see `Server.configureProtectedResource`.
+- **JSON-RPC batching removed for 2025-06-18+.** `BatchRequestTracker` and the `batchId` field are deleted. Batching still works for sessions that negotiate 2024-11-05 or 2025-03-26.
+
+### Added
+- `Server.requestClientSampling`, `requestClientRoots`, `requestClientElicitation` — server-initiated outbound requests with response routing and timeout.
+- `Server.addCompletion` / `removeCompletion` — handler registration for the standard `completion/complete` request, with the new 2025-06-18 `context` field for previously-resolved arguments.
+- Incoming handlers for `notifications/cancelled` and `notifications/progress` (client → server).
+- `CompletionsCapability` advertised via `ServerCapabilities`.
+- `Tool.outputSchema`, `Tool.title`, `Tool.icons`, `Tool.meta` (spec 2025-06-18 / 2025-11-25 metadata).
+- `CallToolResult.structuredContent` (spec 2025-06-18 structured tool output).
+- `ResourceLinkContent` (spec 2025-06-18 `resource_link` content type) and `AudioContent` (2025-03-26+).
+- `Resource.title` / `Prompt.title` / `ResourceTemplate.title` plus matching `icons` / `_meta` fields.
+- `Server.configureProtectedResource` and `Server.protectedResourceMetadata` — RFC 9728 OAuth Protected Resource metadata for `.well-known/oauth-protected-resource`.
+- `Server.onClientProgress` — listener for inbound progress notifications.
+- `McpProtocol.v2025_06_18` and `McpProtocol.v2025_11_25` constants. `latest` advances to `v2025_11_25`.
+- `McpProtocol.supportsBatching` / `supportsElicitation` / `requiresProtocolHeader` / `supportsStructuredToolOutput` / `supportsIconsAndSamplingTools` per-version gates.
+
+### Removed
+- `McpServer.cancel` request handler and the `_handleCancelOperation` method.
+- `McpServer.health/check` and the `_handleHealthCheck` method.
+- All JSON-RPC `auth/*` request handlers and the OAuth grant helpers (~350 lines).
+- `BatchRequestTracker` and batch-array dispatch (replaced with single-message dispatch on 2025-06-18+).
+
+---
+
 ## [1.0.5] - 2026-04-30
 
 - Resource read cache is now opt-in. Pass `cacheable: true` (and optional `cache_max_age`) to cache a response. Mutable resources are no longer silently served stale.
