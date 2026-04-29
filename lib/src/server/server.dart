@@ -117,8 +117,14 @@ class Server implements ServerInterface {
     _onClientProgress = handler;
   }
 
-  // Pending sampling requests tracker
-  final Map<String, Completer<Map<String, dynamic>>> _pendingSamplingRequests = {};
+  /// Tracks server-initiated outbound JSON-RPC requests (e.g.
+  /// `sampling/createMessage`, `roots/list`, `elicitation/create`) so the
+  /// matching client response can complete the awaiting future. Keyed by
+  /// the outbound request id we generate.
+  final Map<String, Completer<dynamic>> _pendingOutboundRequests = {};
+
+  /// Counter used to mint unique outbound request ids.
+  int _outboundRequestSeq = 0;
   
   // Batch request tracking
   final Map<String, BatchRequestTracker> _batchRequests = {};
@@ -983,6 +989,12 @@ class Server implements ServerInterface {
       } else if (message.isRequest) {
         incrementMetric('messages.requests');
         await _handleRequest(sessionId, message);
+      } else if (message.isResponse) {
+        // Response to a server-initiated outbound request (sampling /
+        // roots / elicitation). Match by outbound id and complete the
+        // pending Completer.
+        incrementMetric('messages.responses');
+        _handleOutboundResponse(message);
       } else {
         incrementMetric('messages.invalid');
         _sendErrorResponse(sessionId, message.id, ErrorCode.invalidRequest, 'Invalid request', null, message.batchId);
@@ -1065,10 +1077,6 @@ class Server implements ServerInterface {
               .toList();
           _storeClientRoots(sessionId, roots);
         }
-        break;
-
-      case 'sampling/response':
-        await _handleSamplingResponse(sessionId, notification);
         break;
 
       default:
@@ -1202,10 +1210,6 @@ class Server implements ServerInterface {
 
       case 'prompts/get':
         await _handlePromptGet(sessionId, request);
-        break;
-
-      case 'sampling/createMessage':
-        await _handleSamplingCreateMessage(sessionId, request);
         break;
 
       case 'completion/complete':
@@ -1677,86 +1681,105 @@ class Server implements ServerInterface {
     }
   }
 
-  /// Handle sampling/createMessage request
-  Future<void> _handleSamplingCreateMessage(String sessionId, JsonRpcMessage request) async {
-    if (!capabilities.hasSampling) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Sampling capability not supported');
-      return;
-    }
-
-    // Check client capabilities
+  /// Server-initiated request: ask the connected client's LLM to
+  /// generate a completion (spec `sampling/createMessage`).
+  ///
+  /// [params] follows the spec `CreateMessageRequest.params` shape:
+  /// `messages`, `maxTokens` (required), plus optional `modelPreferences`,
+  /// `systemPrompt`, `includeContext`, `temperature`, `stopSequences`,
+  /// `metadata`.
+  ///
+  /// Returns the spec `CreateMessageResult` map (`role`, `content`,
+  /// `model`, optional `stopReason`).
+  ///
+  /// The client must advertise the `sampling` capability during
+  /// initialize; otherwise this throws [McpError] with methodNotFound.
+  Future<Map<String, dynamic>> requestClientSampling(
+    String sessionId,
+    Map<String, dynamic> params, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
     final session = _sessions[sessionId];
     if (session == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.internalError, 'Session not found');
-      return;
+      throw StateError('Unknown sessionId: $sessionId');
     }
-
-    final clientCapabilities = session.capabilities;
-    final clientHasSampling = (clientCapabilities?['sampling'] != null);
+    final clientHasSampling = session.capabilities?['sampling'] != null;
     if (!clientHasSampling) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Client does not support sampling capability');
-      return;
-    }
-
-    try {
-      // Generate request ID
-      final samplingRequestId = Uuid().v4();
-
-      // Create completer for tracking the request
-      final completer = Completer<Map<String, dynamic>>();
-
-      // Register request tracker
-      _pendingSamplingRequests[samplingRequestId] = completer;
-
-      // Forward request to client
-      _sendNotification(sessionId, 'sampling/createMessage', {
-        'request_id': samplingRequestId,
-        'params': request.params
-      });
-
-      // Wait for response (with timeout)
-      final responseData = await completer.future.timeout(
-          Duration(seconds: 60),
-          onTimeout: () {
-            _pendingSamplingRequests.remove(samplingRequestId);
-            throw TimeoutException('Sampling request timed out');
-          }
+      throw McpError(
+        'Client does not advertise the `sampling` capability',
+        code: ErrorCode.methodNotFound,
       );
-
-      // Send response back to the original requester
-      _sendResponse(sessionId, request.id, responseData);
-
-    } catch (e) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.internalError, 'Sampling error: $e');
     }
+    final result = await _sendRequestToClient(
+        sessionId, 'sampling/createMessage', params, timeout: timeout);
+    return result is Map<String, dynamic>
+        ? result
+        : Map<String, dynamic>.from(result as Map);
   }
 
-// Handler for sampling responses from clients
-  Future<void> _handleSamplingResponse(String sessionId, JsonRpcMessage notification) async {
-    final requestId = notification.params?['request_id'];
-    if (requestId == null) {
-      _logger.error('Received sampling response without request_id');
-      return;
+  /// Server-initiated request: ask the connected client for its current
+  /// list of filesystem / URI roots (spec `roots/list`).
+  ///
+  /// Client must advertise the `roots` capability.
+  Future<List<Root>> requestClientRoots(
+    String sessionId, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final session = _sessions[sessionId];
+    if (session == null) {
+      throw StateError('Unknown sessionId: $sessionId');
     }
-
-    final completer = _pendingSamplingRequests[requestId];
-    if (completer == null) {
-      _logger.error('Received sampling response for unknown request: $requestId');
-      return;
+    final clientHasRoots = session.capabilities?['roots'] != null;
+    if (!clientHasRoots) {
+      throw McpError(
+        'Client does not advertise the `roots` capability',
+        code: ErrorCode.methodNotFound,
+      );
     }
+    final result = await _sendRequestToClient(
+        sessionId, 'roots/list', const {}, timeout: timeout);
+    final list = result is Map ? (result['roots'] as List?) ?? const [] : const [];
+    return list
+        .map((e) => Root(
+              uri: (e as Map)['uri'] as String,
+              name: e['name'] as String? ?? '',
+              description: e['description'] as String?,
+            ))
+        .toList();
+  }
 
-    // Remove request tracker
-    _pendingSamplingRequests.remove(requestId);
-
-    // Extract response data
-    final responseData = notification.params?['result'];
-    if (responseData == null) {
-      completer.completeError('No result in sampling response');
-      return;
+  /// Server-initiated request: ask the connected client to elicit input
+  /// from the user (spec 2025-06-18 `elicitation/create`).
+  ///
+  /// [params] follows the spec `ElicitRequest.params` shape:
+  /// `message` (string) + `requestedSchema` (restricted JSON Schema —
+  /// flat object, primitive properties only).
+  ///
+  /// Returns the spec `ElicitResult` map: `action` (`accept` /
+  /// `decline` / `cancel`) plus `content` when accepted.
+  ///
+  /// Client must advertise the `elicitation` capability.
+  Future<Map<String, dynamic>> requestClientElicitation(
+    String sessionId,
+    Map<String, dynamic> params, {
+    Duration timeout = const Duration(seconds: 120),
+  }) async {
+    final session = _sessions[sessionId];
+    if (session == null) {
+      throw StateError('Unknown sessionId: $sessionId');
     }
-
-    // Complete the response
-    completer.complete(responseData);
+    final clientHasElicitation = session.capabilities?['elicitation'] != null;
+    if (!clientHasElicitation) {
+      throw McpError(
+        'Client does not advertise the `elicitation` capability',
+        code: ErrorCode.methodNotFound,
+      );
+    }
+    final result = await _sendRequestToClient(
+        sessionId, 'elicitation/create', params, timeout: timeout);
+    return result is Map<String, dynamic>
+        ? result
+        : Map<String, dynamic>.from(result as Map);
   }
 
   /// Check if a URI matches a template pattern
@@ -1894,6 +1917,72 @@ class Server implements ServerInterface {
     };
 
     session.transport.send(notification);
+  }
+
+  /// Send a server-initiated JSON-RPC request to a specific client and
+  /// await the matching response.
+  ///
+  /// Used for spec-defined server → client requests:
+  ///   - `sampling/createMessage`
+  ///   - `roots/list`
+  ///   - `elicitation/create`
+  ///
+  /// Throws [TimeoutException] if no response within [timeout] (default
+  /// 60s). Throws [McpError] if the client returns a JSON-RPC error.
+  Future<dynamic> _sendRequestToClient(
+    String sessionId,
+    String method,
+    Map<String, dynamic> params, {
+    Duration timeout = const Duration(seconds: 60),
+  }) {
+    final session = _sessions[sessionId];
+    if (session == null) {
+      throw StateError('Unknown sessionId for outbound request: $sessionId');
+    }
+    final id = 'srv-${++_outboundRequestSeq}';
+    final completer = Completer<dynamic>();
+    _pendingOutboundRequests[id] = completer;
+
+    final message = {
+      'jsonrpc': '2.0',
+      'id': id,
+      'method': method,
+      'params': params,
+      '_targetSessionId': sessionId,
+    };
+    session.transport.send(message);
+
+    return completer.future.timeout(timeout, onTimeout: () {
+      _pendingOutboundRequests.remove(id);
+      throw TimeoutException(
+          'Outbound request `$method` timed out after ${timeout.inSeconds}s');
+    });
+  }
+
+  /// Match an incoming JSON-RPC response (`id` set, no `method`) to a
+  /// pending outbound request and complete its Completer.
+  void _handleOutboundResponse(JsonRpcMessage response) {
+    final id = response.id?.toString();
+    if (id == null) {
+      _logger.warning('Received response without id; dropping.');
+      return;
+    }
+    final completer = _pendingOutboundRequests.remove(id);
+    if (completer == null) {
+      _logger.warning(
+          'Received response for unknown outbound request id `$id`; dropping.');
+      return;
+    }
+    if (response.error != null) {
+      completer.completeError(McpError(
+        response.error!['message']?.toString() ?? 'Outbound request failed',
+        code: response.error!['code'] is int
+            ? response.error!['code'] as int
+            : ErrorCode.internalError,
+      ));
+    } else {
+      completer.complete(response.result);
+    }
   }
 
   /// Broadcast a notification to all connected sessions
@@ -2096,36 +2185,28 @@ class Server implements ServerInterface {
     return regex.hasMatch(uri);
   }
   
-  /// Add a root to the server
+  /// Add a server-side root entry to the local cache.
+  ///
+  /// NOTE: Per MCP spec, roots are a client-owned concept — the server
+  /// asks the client for its roots via [requestClientRoots]. This method
+  /// only manages an OPTIONAL server-side cache and does NOT emit
+  /// `notifications/roots/list_changed` (which would be in the wrong
+  /// direction — spec defines that notification as client → server).
+  /// Use [requestClientRoots] to fetch the client's authoritative roots.
   void addRoot(Root root) {
     if (_roots.any((r) => r.uri == root.uri)) {
       throw McpError('Root with URI "${root.uri}" already exists');
     }
-    
     _roots.add(root);
-    
-    // Notify clients about root changes
-    if (isConnected) {
-      _broadcastNotification('notifications/roots/list_changed', {
-        'roots': _roots.map((r) => r.toJson()).toList(),
-      });
-    }
   }
-  
-  /// Remove a root from the server
+
+  /// Remove a server-side cached root entry (see [addRoot] for the
+  /// direction caveat).
   void removeRoot(String uri) {
     if (!_roots.any((r) => r.uri == uri)) {
       throw McpError('Root with URI "$uri" does not exist');
     }
-    
     _roots.removeWhere((r) => r.uri == uri);
-    
-    // Notify clients about root changes
-    if (isConnected) {
-      _broadcastNotification('notifications/roots/list_changed', {
-        'roots': _roots.map((r) => r.toJson()).toList(),
-      });
-    }
   }
   
   /// Get all server roots
@@ -2186,11 +2267,14 @@ class Server implements ServerInterface {
 /// Error class for MCP-related errors
 class McpError implements Exception {
   final String message;
+  final int? code;
+  final dynamic data;
 
-  McpError(this.message);
+  McpError(this.message, {this.code, this.data});
 
   @override
-  String toString() => 'McpError: $message';
+  String toString() =>
+      code != null ? 'McpError($code): $message' : 'McpError: $message';
 }
 
 /// JSON-RPC message
