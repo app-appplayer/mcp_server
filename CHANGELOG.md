@@ -1,3 +1,9 @@
+## [1.0.5] - 2026-04-30
+
+- Resource read cache is now opt-in. Pass `cacheable: true` (and optional `cache_max_age`) to cache a response. Mutable resources are no longer silently served stale.
+
+---
+
 ## [1.0.4] - 2026-04-28
 
 ### Changed

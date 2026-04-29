@@ -1380,8 +1380,12 @@ class Server implements ServerInterface {
             'Operation cancelled by client'
         );
       } else {
-        // Cache result if cacheable
-        final cacheable = request.params?['cacheable'] != false; // default true
+        // Cache result only when explicitly opted in. Default is OFF so
+        // mutable resources (canonical state, live data, sensor reads)
+        // are never silently served stale. Consumers that benefit from
+        // caching pass `cacheable: true` and optionally
+        // `cache_max_age: <seconds>`.
+        final cacheable = request.params?['cacheable'] == true;
         if (cacheable) {
           final maxAge = request.params?['cache_max_age'] as int?;
           final maxAgeDuration = maxAge != null ? Duration(seconds: maxAge) : null;
