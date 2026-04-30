@@ -4,19 +4,19 @@ A Dart plugin for implementing [Model Context Protocol (MCP)](https://modelconte
 
 ## Features
 
-- Create MCP servers with standardized protocol support
-- Expose data through **Resources**
-- Provide functionality through **Tools**
-- Define interaction patterns through **Prompts**
-- Comprehensive session management with event streams
-- Built-in resource caching for performance optimization
-- Progress reporting and cancellation for long-running operations
-- Extensive logging system with customizable levels and formatting
-- Performance monitoring and metrics tracking
-- Multiple transport layers:
-  - Standard I/O for local process communication
-  - Server-Sent Events (SSE) for HTTP-based communication
-- Cross-platform support: Android, iOS, web, Linux, Windows, macOS
+- **Multi-revision MCP support** with per-version capability gating — see _Protocol Versions_ below
+- **Core primitives** — `Resources`, `Tools`, `Prompts`, plus `Completions` (2025-06-18+)
+- **Server-initiated requests** — `requestClientSampling`, `requestClientRoots`, `requestClientElicitation` with response routing and timeout
+- **OAuth 2.1 Resource Server** (RFC 9728) — `configureProtectedResource` exposes `.well-known/oauth-protected-resource`; HTTP layer validates Bearer tokens
+- **Structured tool output** (2025-06-18) — `outputSchema` + `structuredContent` + `resource_link` content type
+- **Icons + sampling tool calls** (2025-11-25) — `Tool.icons` / `Resource.icons` / `Prompt.icons`, plus the new `tools` / `toolChoice` fields on `sampling/createMessage`
+- **List-changed notifications** — spec-canonical `notifications/{tools,resources,prompts}/list_changed`
+- **Progress + cancellation** — outbound `notifyProgress`; inbound `notifications/cancelled` and `notifications/progress` listeners
+- **Session events** — `onConnect` / `onDisconnect` streams, per-session protocol version + capabilities
+- **Resource caching** — opt-in via `cacheable: true` on `addResource` (mutable resources are not silently cached)
+- **Health + metrics** — `getHealth()`, named timers, custom counters
+- **Transports** — stdio, SSE (legacy), Streamable HTTP (canonical 2025-03-26+)
+- **Cross-platform**: Android, iOS, web, Linux, Windows, macOS
 
 ## Protocol Versions
 
@@ -647,23 +647,28 @@ server.notifyProgress(operationId, 0.5, 'Halfway done');
 
 ### Resource Caching
 
-The server includes built-in caching for resources to improve performance:
+Resource read caching is **opt-in per request** — the client passes `cacheable: true` (and an optional `cache_max_age` in seconds) in the `resources/read` params. Mutable resources should not be requested with `cacheable: true` so updates are not served stale.
 
 ```dart
-// Use built-in caching mechanism
-final cached = server.getCachedResource(uri);
-if (cached != null) {
-  return cached.content;
-}
+// Manual server-side cache control when underlying state changes
+server.invalidateCache('config://app');
+```
 
-// Fetch the resource (expensive operation)
-final result = await fetchResource(uri, params);
+### OAuth 2.1 Resource Server (RFC 9728)
 
-// Cache for future use (5 minutes)
-server.cacheResource(uri, result, Duration(minutes: 5));
+For HTTP transports the server exposes Protected Resource metadata at `.well-known/oauth-protected-resource`:
 
-// Invalidate cache when resource changes
-server.invalidateCache(uri);
+```dart
+server.configureProtectedResource(
+  resource: 'https://api.example.com/mcp',
+  authorizationServers: ['https://auth.example.com'],
+  bearerMethodsSupported: ['header'],
+  scopesSupported: ['mcp:tools', 'mcp:resources'],
+);
+
+// The HTTP transport validates the Bearer token from the Authorization
+// header against your configured `authMiddleware` and forwards the
+// authenticated identity to tool / resource / prompt handlers.
 ```
 
 ### Progress Tracking

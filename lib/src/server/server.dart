@@ -223,6 +223,17 @@ class Server implements ServerInterface {
     // Determine if this is a multi-session transport (StreamableHTTP)
     final isMultiSessionTransport = transport is StreamableHttpServerTransport;
 
+    // Wire RFC 9728 metadata into the streamable HTTP transport so the
+    // spec route `/.well-known/oauth-protected-resource` resolves to the
+    // current snapshot of `protectedResourceMetadata`. Using a callback
+    // (rather than a one-shot copy) so a later
+    // `configureProtectedResource(...)` is reflected without reconnect.
+    if (isMultiSessionTransport) {
+      transport.setProtectedResourceMetadataProvider(
+        () => protectedResourceMetadata,
+      );
+    }
+
     // Create initial session only for single-session transports (for backward compatibility)
     String? initialSessionId;
     if (!isMultiSessionTransport) {
@@ -252,6 +263,15 @@ class Server implements ServerInterface {
             // Update metrics
             _metricsCollector.gauge('mcp_connections_active').set(_sessions.length.toDouble());
             _metricsCollector.counter('mcp_connections_total').increment();
+
+            // Emit the connect event so consumers can track sessions —
+            // the single-session path goes through `_createSession`
+            // which fires this; the multi-session inline path used by
+            // streamable HTTP / SSE was previously skipping it,
+            // leaving `server.onConnect` silent for those transports.
+            if (!_connectStreamController.isClosed) {
+              _connectStreamController.add(session);
+            }
           }
         } else {
           // Single-session transport: use initial session ID
@@ -547,6 +567,30 @@ class Server implements ServerInterface {
 
     // Emit change event
     _promptsChangedController.add(null);
+  }
+
+  /// Map-based variant of [addPrompt] — accepts the prompt arguments as
+  /// raw spec JSON (`[{name, description, required?, default?}]`).
+  /// Sibling for adapters that hold the server as `dynamic` and so
+  /// can't synthesise `List<PromptArgument>` at the call site.
+  void addPromptMap({
+    required String name,
+    required String description,
+    required List<Map<String, dynamic>> arguments,
+    required PromptHandler handler,
+    String? title,
+    List<Map<String, dynamic>>? icons,
+    Map<String, dynamic>? meta,
+  }) {
+    addPrompt(
+      name: name,
+      description: description,
+      arguments: arguments.map(PromptArgument.fromJson).toList(),
+      handler: handler,
+      title: title,
+      icons: icons,
+      meta: meta,
+    );
   }
 
   /// Register a completion handler for argument autocompletion (spec
@@ -2150,6 +2194,87 @@ class Server implements ServerInterface {
   Map<String, dynamic> getMetrics() {
     return _metricsCollector.toJson();
   }
+
+  // ─────────────────── OAuth / Protected Resource (RFC 9728) ───────────────────
+  //
+  // Originally these lived on the `OAuthServerMethods` extension below
+  // for organisational reasons. Extensions are dispatched statically and
+  // are invisible to `dynamic` callers (notably `mcp_llm`'s
+  // `LlmServerAdapter`, which holds the server as `dynamic` to stay
+  // generic). The bodies are duplicated as instance methods so dynamic
+  // dispatch can find them; the extension still works for direct typed
+  // callers.
+
+  /// Enable OAuth authentication with the specified validator.
+  void enableAuthentication(
+    TokenValidator validator, {
+    List<String> publicPaths = const ['/health', '/ping'],
+    List<String> defaultRequiredScopes = const [],
+    bool strictMode = true,
+  }) {
+    _authMiddleware = AuthMiddleware(
+      validator: validator,
+      publicPaths: publicPaths,
+      defaultRequiredScopes: defaultRequiredScopes,
+      strictMode: strictMode,
+    );
+    _logger.info('OAuth authentication enabled');
+  }
+
+  /// Disable OAuth authentication.
+  void disableAuthentication() {
+    _authMiddleware = null;
+    _logger.info('OAuth authentication disabled');
+  }
+
+  /// Whether OAuth authentication is currently enabled.
+  bool get isAuthenticationEnabled => _authMiddleware != null;
+
+  /// Spec 2025-06-18 (RFC 9728): metadata for the server as an OAuth 2.0
+  /// Protected Resource. Returns `null` until [configureProtectedResource]
+  /// has been called.
+  ///
+  /// The route deliberately doesn't require [enableAuthentication] to
+  /// have been called — the streamable HTTP transport may enforce auth
+  /// via its own `config.authToken` (a static bearer) instead of the
+  /// `_authMiddleware`, and clients query this route precisely to learn
+  /// where to obtain a token, so it makes no sense to gate it on the
+  /// auth middleware that protects the *other* routes.
+  Map<String, dynamic>? get protectedResourceMetadata {
+    if (_protectedResource == null) return null;
+    final m = _protectedResource!;
+    return <String, dynamic>{
+      'resource': m.resource,
+      'authorization_servers': m.authorizationServers,
+      if (m.scopesSupported != null) 'scopes_supported': m.scopesSupported,
+      if (m.bearerMethodsSupported != null)
+        'bearer_methods_supported': m.bearerMethodsSupported,
+      if (m.resourceDocumentation != null)
+        'resource_documentation': m.resourceDocumentation,
+    };
+  }
+
+  /// Configure the OAuth Protected Resource metadata served at
+  /// `/.well-known/oauth-protected-resource` (RFC 9728).
+  void configureProtectedResource({
+    required String resource,
+    required List<String> authorizationServers,
+    List<String>? scopesSupported,
+    List<String>? bearerMethodsSupported,
+    String? resourceDocumentation,
+  }) {
+    _protectedResource = _ProtectedResourceMetadata(
+      resource: resource,
+      authorizationServers: List.unmodifiable(authorizationServers),
+      scopesSupported: scopesSupported == null
+          ? null
+          : List.unmodifiable(scopesSupported),
+      bearerMethodsSupported: bearerMethodsSupported == null
+          ? null
+          : List.unmodifiable(bearerMethodsSupported),
+      resourceDocumentation: resourceDocumentation,
+    );
+  }
 }
 
 
@@ -2301,84 +2426,13 @@ abstract class ServerInterface {
   void removePrompt(String name);
 }
 
-// Additional OAuth methods for Server class
+// Additional OAuth helpers for Server class.
+//
+// The public methods (enableAuthentication, configureProtectedResource,
+// etc.) live on the class itself so dynamic-typed callers can find them.
+// Only the truly-internal helper `_authenticateRequest` stays on this
+// extension — it's invoked statically from inside the class.
 extension OAuthServerMethods on Server {
-  /// Enable OAuth authentication with the specified validator
-  void enableAuthentication(TokenValidator validator, {
-    List<String> publicPaths = const ['/health', '/ping'],
-    List<String> defaultRequiredScopes = const [],
-    bool strictMode = true,
-  }) {
-    _authMiddleware = AuthMiddleware(
-      validator: validator,
-      publicPaths: publicPaths,
-      defaultRequiredScopes: defaultRequiredScopes,
-      strictMode: strictMode,
-    );
-    _logger.info('OAuth authentication enabled');
-  }
-  
-  /// Disable OAuth authentication
-  void disableAuthentication() {
-    _authMiddleware = null;
-    _logger.info('OAuth authentication disabled');
-  }
-  
-  /// Check if authentication is enabled
-  bool get isAuthenticationEnabled => _authMiddleware != null;
-
-  /// Spec 2025-06-18 (RFC 9728): metadata for the server as an OAuth 2.0
-  /// Protected Resource. Streamable HTTP transports SHOULD expose this at
-  /// `/.well-known/oauth-protected-resource`. Returns `null` when
-  /// authentication is not enabled.
-  ///
-  /// Set the source-of-truth fields via [configureProtectedResource].
-  /// The metadata at minimum names the resource and the authorization
-  /// servers that issue tokens for it. RFC 8707 (Resource Indicators)
-  /// requires clients to send `resource: <this resource URI>` when
-  /// requesting tokens, so the resource URI is mandatory.
-  Map<String, dynamic>? get protectedResourceMetadata {
-    if (_authMiddleware == null || _protectedResource == null) return null;
-    final m = _protectedResource!;
-    return <String, dynamic>{
-      'resource': m.resource,
-      'authorization_servers': m.authorizationServers,
-      if (m.scopesSupported != null) 'scopes_supported': m.scopesSupported,
-      if (m.bearerMethodsSupported != null)
-        'bearer_methods_supported': m.bearerMethodsSupported,
-      if (m.resourceDocumentation != null)
-        'resource_documentation': m.resourceDocumentation,
-    };
-  }
-
-  /// Configure the OAuth Protected Resource metadata served at
-  /// `/.well-known/oauth-protected-resource` (RFC 9728).
-  ///
-  /// [resource] is the canonical resource URI clients pass as the
-  /// `resource` parameter (RFC 8707) when requesting tokens.
-  /// [authorizationServers] lists the AS issuer URLs that mint tokens
-  /// valid for this resource. 2025-11-25 also recognises OIDC
-  /// `.well-known/openid-configuration` discovery on those AS issuers.
-  void configureProtectedResource({
-    required String resource,
-    required List<String> authorizationServers,
-    List<String>? scopesSupported,
-    List<String>? bearerMethodsSupported,
-    String? resourceDocumentation,
-  }) {
-    _protectedResource = _ProtectedResourceMetadata(
-      resource: resource,
-      authorizationServers: List.unmodifiable(authorizationServers),
-      scopesSupported: scopesSupported == null
-          ? null
-          : List.unmodifiable(scopesSupported),
-      bearerMethodsSupported: bearerMethodsSupported == null
-          ? null
-          : List.unmodifiable(bearerMethodsSupported),
-      resourceDocumentation: resourceDocumentation,
-    );
-  }
-  
   /// Authenticate a request using the configured auth middleware
   Future<AuthResult?> _authenticateRequest(String sessionId, JsonRpcMessage request) async {
     if (_authMiddleware == null) return null;

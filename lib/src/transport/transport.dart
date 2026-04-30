@@ -198,6 +198,14 @@ class SseServerTransport implements ServerTransport {
   HttpServer? _server;
   final _sessionClients = <String, HttpResponse>{};
   final _sessionCompression = <String, CompressionType>{};
+  // Per-session in-flight write chain. Each new write awaits the
+  // previous one's flush before issuing its own — `IOSink.flush()`
+  // briefly binds the sink, and any second `write` during that window
+  // raises `Bad state: StreamSink is bound to a stream` (which
+  // previously aborted any tool whose handler triggered a notification
+  // broadcast: the broadcast write succeeded, but the response that
+  // followed it within the same dispatch hit the bound sink).
+  final _sessionFlushChain = <String, Future<void>>{};
   late final CompressionMiddleware _compression;
 
   SseServerTransport({
@@ -416,46 +424,59 @@ class SseServerTransport implements ServerTransport {
     final jsonString = jsonEncode(message);
     final eventData = 'event: message\ndata: $jsonString\n\n';
 
-    // Store sessions to remove if sending fails
-    final toRemove = <String>[];
-
-    _sessionClients.forEach((sessionId, client) {
-      final compressionType = _sessionCompression[sessionId] ?? CompressionType.none;
-      final success = _sendToClient(client, eventData, compressionType);
-      if (!success) {
-        _logger.debug('[SSE] Removing disconnected client: $sessionId');
-        toRemove.add(sessionId);
-      }
-    });
-
-    for (final id in toRemove) {
-      _sessionClients.remove(id);
-      _sessionCompression.remove(id);
+    // Snapshot to avoid mutation during async dispatch.
+    final sessions = List<MapEntry<String, HttpResponse>>.from(
+      _sessionClients.entries,
+    );
+    for (final entry in sessions) {
+      final sessionId = entry.key;
+      final client = entry.value;
+      final compressionType =
+          _sessionCompression[sessionId] ?? CompressionType.none;
+      _enqueueSend(sessionId, client, eventData, compressionType);
     }
   }
 
-  /// Safely sends data to a client, returns false if an error occurred
-  bool _sendToClient(HttpResponse client, String data, CompressionType compressionType) {
+  void _enqueueSend(
+    String sessionId,
+    HttpResponse client,
+    String data,
+    CompressionType compressionType,
+  ) {
+    final prior = _sessionFlushChain[sessionId] ?? Future<void>.value();
+    final next = prior
+        .then((_) => _writeOnce(sessionId, client, data, compressionType));
+    _sessionFlushChain[sessionId] = next;
+    next.whenComplete(() {
+      if (identical(_sessionFlushChain[sessionId], next)) {
+        _sessionFlushChain.remove(sessionId);
+      }
+    });
+  }
+
+  Future<void> _writeOnce(
+    String sessionId,
+    HttpResponse client,
+    String data,
+    CompressionType compressionType,
+  ) async {
+    if (!_sessionClients.containsKey(sessionId)) return;
     try {
       if (compressionType != CompressionType.none) {
-        // Compress the data
         final bytes = utf8.encode(data);
         final compressed = _compression.compress(bytes, 'text/event-stream');
-        
         if (compressed != null && compressed.worthCompressing) {
           client.add(compressed.data);
-          client.flush();
-          return true;
+          await client.flush();
+          return;
         }
       }
-      
-      // Send uncompressed
       client.write(data);
-      client.flush();
-      return true;
+      await client.flush();
     } catch (e) {
-      _logger.debug('[SSE] Failed to send to client: $e');
-      return false;
+      _logger.debug('[SSE] dropping disconnected session $sessionId: $e');
+      _sessionClients.remove(sessionId);
+      _sessionCompression.remove(sessionId);
     }
   }
 

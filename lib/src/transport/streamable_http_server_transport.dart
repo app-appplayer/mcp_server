@@ -159,7 +159,21 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   // Timer for cleanup of old responses
   Timer? _cleanupTimer;
-  
+
+  // RFC 9728 OAuth Protected Resource metadata provider. Server.connect()
+  // wires this so the transport can serve the spec-defined
+  // `.well-known/oauth-protected-resource` route without the transport
+  // needing a back-reference to the Server.
+  Map<String, dynamic>? Function()? _protectedResourceMetadataProvider;
+
+  /// Register a callback the transport will invoke to populate the
+  /// `.well-known/oauth-protected-resource` document. Returning `null`
+  /// from the callback causes the route to respond with 404.
+  void setProtectedResourceMetadataProvider(
+      Map<String, dynamic>? Function() provider) {
+    _protectedResourceMetadataProvider = provider;
+  }
+
   StreamableHttpServerTransport({
     required this.config,
     @Deprecated('sessionId parameter is ignored. StreamableHTTP now manages multiple sessions internally.')
@@ -189,6 +203,18 @@ class StreamableHttpServerTransport implements ServerTransport {
 
     // Validate session ID from client
     if (sessionId != null && sessionId.isNotEmpty) {
+      // Reject any request that quotes a session id we've already
+      // terminated (DELETE marked it). Returning the same id (without
+      // adding it to _activeSessions) lets the caller's later
+      // `_isSessionTerminated(sessionId)` check fire and reply 404.
+      // Without this branch, the else-clause below silently rotated
+      // the terminated id into a fresh active id, defeating
+      // session-termination.
+      if (_terminatedSessions.contains(sessionId)) {
+        _logger.debug('Reusing terminated session id for rejection: '
+            '$sessionId');
+        return sessionId;
+      }
       // Check if session is active (session reconnection)
       if (_activeSessions.contains(sessionId)) {
         _logger.debug('Session reconnected: $sessionId');
@@ -296,13 +322,24 @@ class StreamableHttpServerTransport implements ServerTransport {
           : config.endpoint;
       
       // Check if this is a response polling request (async mode)
-      if (config.isJsonResponseEnabled && 
+      if (config.isJsonResponseEnabled &&
           config.jsonResponseMode == 'async' &&
           requestPath.startsWith('$configEndpoint/responses/')) {
         await _handleResponsePolling(request);
         return;
       }
-      
+
+      // RFC 9728 OAuth Protected Resource metadata. Served unconditionally
+      // when the Server has registered metadata via
+      // `Server.configureProtectedResource(...)` — the route is read-only
+      // and intentionally bypasses the Bearer-token check (clients query
+      // it precisely to discover where to obtain a token).
+      if (request.method == 'GET' &&
+          requestPath == '/.well-known/oauth-protected-resource') {
+        await _handleProtectedResourceMetadata(request);
+        return;
+      }
+
       if (requestPath != configEndpoint) {
         _sendErrorResponse(
           request.response,
@@ -352,6 +389,27 @@ class StreamableHttpServerTransport implements ServerTransport {
     }
   }
   
+  /// Handle GET `/.well-known/oauth-protected-resource` (RFC 9728).
+  /// Returns the JSON metadata when the Server has called
+  /// [Server.configureProtectedResource]; otherwise 404.
+  Future<void> _handleProtectedResourceMetadata(HttpRequest request) async {
+    _setCorsHeaders(request.response);
+    final metadata = _protectedResourceMetadataProvider?.call();
+    if (metadata == null) {
+      _sendErrorResponse(
+        request.response,
+        '',
+        'Not Found: Protected Resource metadata is not configured',
+        HttpStatus.notFound,
+      );
+      return;
+    }
+    request.response.statusCode = HttpStatus.ok;
+    request.response.headers.set('Content-Type', contentTypeJson);
+    request.response.write(jsonEncode(metadata));
+    await request.response.close();
+  }
+
   /// Handle OPTIONS request for CORS
   Future<void> _handleOptionsRequest(HttpRequest request) async {
     request.response.statusCode = HttpStatus.ok;
@@ -452,14 +510,23 @@ class StreamableHttpServerTransport implements ServerTransport {
       '_sessionId': sessionId,  // Internal metadata for session routing
     };
 
-    // Handle notification (no response expected)
-    if (jsonRpcRequest['id'] == null) {
+    // Handle notification (no response expected) AND incoming responses
+    // to server-initiated requests (id present but no method, just
+    // result/error). Both should be queued without making the caller
+    // wait for an application-level response — the application either
+    // ignores the notification or matches the response to a pending
+    // outbound request via Server._handleOutboundResponse.
+    final isResponse = jsonRpcRequest['method'] is! String &&
+        jsonRpcRequest.containsKey('id') &&
+        (jsonRpcRequest.containsKey('result') ||
+            jsonRpcRequest['error'] is Map);
+    if (jsonRpcRequest['id'] == null || isResponse) {
       // Send to message controller with session metadata
       if (!_messageController.isClosed) {
         _messageController.add(wrappedMessage);
       }
 
-      // Return 202 Accepted for all notifications
+      // Return 202 Accepted for notifications and responses
       request.response.statusCode = HttpStatus.accepted;
       request.response.headers.set('Content-Type', contentTypeJson);
       request.response.headers.set('Content-Length', '0');
@@ -696,8 +763,10 @@ class StreamableHttpServerTransport implements ServerTransport {
       return;
     }
 
-    // Validate Accept header - more lenient for GET requests
-    final acceptHeader = request.headers.value('accept');
+    // Validate Accept header - more lenient for GET requests.
+    // Use the list form because clients may send multiple `Accept:` lines
+    // (the Python `mcp` SDK does: one for JSON, one for SSE).
+    final acceptHeader = _readAccept(request);
     _logger.debug('Accept header: $acceptHeader');
 
     if (acceptHeader != null &&
@@ -821,28 +890,44 @@ class StreamableHttpServerTransport implements ServerTransport {
     _terminatedSessions.add(sessionId);
     _activeSessions.remove(sessionId);
 
-    // Close session-specific GET stream
-    if (_getStreams.containsKey(sessionId)) {
-      await _getStreams[sessionId]?.controller.close();
-      _getStreams.remove(sessionId);
-    }
-
-    // Close session-specific message controller
-    if (_sessionMessageControllers.containsKey(sessionId)) {
-      await _sessionMessageControllers[sessionId]?.close();
-      _sessionMessageControllers.remove(sessionId);
-    }
-
-    // Note: We don't close all SSE streams here, only session-specific ones
-    // Request-specific SSE streams (_sseStreams) are managed per-request, not per-session
-
+    // Send the 204 BEFORE waiting on cleanup. Closing the GET stream's
+    // StreamController used to await the response's `done` future, and
+    // since the response is held open by the SSE event sink we never
+    // got past it — the DELETE caller saw a connection timeout.
+    // Per spec the response body for a session-terminate is empty, so
+    // there's no value in deferring the status write.
     request.response.statusCode = HttpStatus.noContent;
-    await request.response.close();
+    final responseClose = request.response.close();
+
+    // Fire-and-forget the controller closures: they cascade into the
+    // onDone callbacks which themselves close the held HTTP responses
+    // for the SSE/GET streams. Awaiting them serially before
+    // responding to the DELETE deadlocks under realistic clients.
+    final getStream = _getStreams.remove(sessionId);
+    unawaited(getStream?.controller.close() ?? Future<void>.value());
+    final sessionCtrl = _sessionMessageControllers.remove(sessionId);
+    unawaited(sessionCtrl?.close() ?? Future<void>.value());
+
+    // Note: We don't close all SSE streams here, only session-specific
+    // ones. Request-specific SSE streams (_sseStreams) are managed
+    // per-request, not per-session.
+    await responseClose;
   }
   
+  /// Read the Accept header tolerating multi-value forms.
+  ///
+  /// `HttpHeaders.value()` throws when a header appears more than once
+  /// (the Python `mcp` SDK sends two `Accept:` lines for JSON and SSE).
+  /// Joining the list preserves both values for downstream parsing.
+  String? _readAccept(HttpRequest request) {
+    final values = request.headers['accept'];
+    if (values == null || values.isEmpty) return null;
+    return values.join(', ');
+  }
+
   /// Validate Accept headers - MCP spec: POST requires both JSON and SSE
   bool _validateAcceptHeaders(HttpRequest request) {
-    final acceptHeader = request.headers.value('accept') ?? '';
+    final acceptHeader = _readAccept(request) ?? '';
     
     // Handle empty or wildcard accept headers
     if (acceptHeader.isEmpty || acceptHeader == '*/*') {
@@ -900,11 +985,26 @@ class StreamableHttpServerTransport implements ServerTransport {
     );
   }
   
-  /// Check if request is valid JSON-RPC
-  bool _isValidJsonRpc(Map<String, dynamic> request) {
-    return request['jsonrpc'] == '2.0' && 
-           request.containsKey('method') &&
-           request['method'] is String;
+  /// Validate that the message is a JSON-RPC 2.0 envelope.
+  ///
+  /// Accepts the three legal shapes per spec:
+  ///   - request: `{jsonrpc, id, method, params?}`
+  ///   - notification: `{jsonrpc, method, params?}` (no id)
+  ///   - response: `{jsonrpc, id, result | error}` (no method)
+  ///
+  /// Earlier versions required `method` for every POST, which silently
+  /// rejected client → server responses to outbound server-initiated
+  /// requests (sampling/createMessage etc.) — the response then sat
+  /// dropped while the originating tool waited for a reply.
+  bool _isValidJsonRpc(Map<String, dynamic> message) {
+    if (message['jsonrpc'] != '2.0') return false;
+    final hasMethod = message['method'] is String;
+    final hasResult = message.containsKey('result');
+    final hasError = message['error'] is Map;
+    final hasId = message.containsKey('id');
+    if (hasMethod) return true; // request or notification
+    if (hasId && (hasResult || hasError)) return true; // response
+    return false;
   }
   
   /// Set CORS headers
@@ -987,8 +1087,21 @@ class StreamableHttpServerTransport implements ServerTransport {
     
     try {
       _logger.debug('StreamableHTTP send() called with message: $message');
-      
-      if (message is Map && message.containsKey('id')) {
+
+      // A message is a JSON-RPC RESPONSE only when it has an id AND no
+      // method (i.e. it carries `result` or `error`). A server-INITIATED
+      // request (e.g., `sampling/createMessage`, `elicitation/create`)
+      // also has an id but is NOT a response — it must be routed to the
+      // standalone GET stream so the client can pick it up. The earlier
+      // `containsKey('id')` check sent every id-bearing message into
+      // the response-completion path, which dropped outbound
+      // server-initiated requests on the floor with `No pending request
+      // found for response with ID: srv-N`.
+      final isResponse = message is Map &&
+          message.containsKey('id') &&
+          !message.containsKey('method');
+
+      if (isResponse) {
         final requestId = message['id'];
         _logger.debug('Response ID: $requestId (type: ${requestId.runtimeType})');
         

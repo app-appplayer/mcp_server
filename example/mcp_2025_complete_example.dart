@@ -1,6 +1,6 @@
-/// Comprehensive MCP 2025-03-26 server example showcasing current API features
-/// 
-/// This example demonstrates the current stable API with working implementations.
+/// Comprehensive MCP server showcase. Uses stdio transport — diagnostic
+/// output is routed through the `logging` package to stderr so it does
+/// not corrupt the JSON-RPC framing on stdout.
 library;
 
 import 'dart:async';
@@ -8,8 +8,13 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:mcp_server/mcp_server.dart';
 
+final appLog = Logger('mcp_server.example.complete');
+
 void main() async {
-  // Initialize server with enhanced capabilities
+  Logger.root.level = Level.INFO;
+  Logger.root.onRecord.listen((r) {
+    stderr.writeln('[${r.level.name}] ${r.loggerName}: ${r.message}');
+  });
   await runCompleteMcpServer();
 }
 
@@ -738,7 +743,7 @@ void _setupEventHandlers(Server server, Logger logger) {
 /*
 /// Register tools with comprehensive 2025-03-26 annotations
 void _registerEnhancedTools(Server server) {
-  print('📝 Registering enhanced tools with annotations...');
+  appLog.info('📝 Registering enhanced tools with annotations...');
 
   // Safe read-only tool
   server.addTool(
@@ -891,7 +896,7 @@ void _registerEnhancedTools(Server server) {
         
         // Report progress every 10%
         if ((i + 1) % (datasetSize ~/ 10).clamp(1, datasetSize) == 0) {
-          print('Progress: ${(progress * 100).toStringAsFixed(1)}%');
+          appLog.info('Progress: ${(progress * 100).toStringAsFixed(1)}%');
         }
       }
       
@@ -970,12 +975,12 @@ void _registerEnhancedTools(Server server) {
     },
   );
 
-  print('✅ Enhanced tools registered successfully');
+  appLog.info('✅ Enhanced tools registered successfully');
 }
 
 /// Register resource templates for dynamic access
 void _registerResourceTemplates(Server server) {
-  print('📂 Registering resource templates...');
+  appLog.info('📂 Registering resource templates...');
 
   // File system template
   server.addResourceTemplate(
@@ -1053,12 +1058,12 @@ void _registerResourceTemplates(Server server) {
     },
   );
 
-  print('✅ Resource templates registered successfully');
+  appLog.info('✅ Resource templates registered successfully');
 }
 
 /// Register enhanced prompts with arguments
 void _registerEnhancedPrompts(Server server) {
-  print('💬 Registering enhanced prompts...');
+  appLog.info('💬 Registering enhanced prompts...');
 
   // Dynamic prompt with arguments
   server.addPrompt(
@@ -1180,12 +1185,12 @@ Provide insights on:
     },
   );
 
-  print('✅ Enhanced prompts registered successfully');
+  appLog.info('✅ Enhanced prompts registered successfully');
 }
 
 /// Set up OAuth authentication example
 void _setupAuthentication(Server server) {
-  print('🔐 Setting up authentication examples...');
+  appLog.info('🔐 Setting up authentication examples...');
   
   // In a real implementation, you would:
   // 1. Configure OAuth provider settings
@@ -1193,50 +1198,50 @@ void _setupAuthentication(Server server) {
   // 3. Define scopes and permissions
   // 4. Implement authorization middleware
   
-  print('ℹ️  Authentication setup would include:');
-  print('   - OAuth 2.1 configuration');
-  print('   - Token validation endpoints');
-  print('   - Scope-based access control');
-  print('   - Authorization middleware');
+  appLog.info('ℹ️  Authentication setup would include:');
+  appLog.info('   - OAuth 2.1 configuration');
+  appLog.info('   - Token validation endpoints');
+  appLog.info('   - Scope-based access control');
+  appLog.info('   - Authorization middleware');
 }
 
 /// Configure event handlers for the server
 void _setupEventHandlers(Server server) {
-  print('📡 Setting up event handlers...');
+  appLog.info('📡 Setting up event handlers...');
 
   // Tool list changes
   server.onToolsChanged(() {
-    print('🔧 Tools list updated');
+    appLog.info('🔧 Tools list updated');
   });
 
   // Resource list changes
   server.onResourcesChanged(() {
-    print('📁 Resources list updated');
+    appLog.info('📁 Resources list updated');
   });
 
   // Prompt list changes
   server.onPromptsChanged(() {
-    print('💭 Prompts list updated');
+    appLog.info('💭 Prompts list updated');
   });
 
-  print('✅ Event handlers configured');
+  appLog.info('✅ Event handlers configured');
 }
 
 /// Start HTTP server with Streamable HTTP transport
 Future<void> _startHttpServer(Server server) async {
-  print('🌐 Starting Streamable HTTP server...');
+  appLog.info('🌐 Starting Streamable HTTP server...');
   
   try {
     // Create HTTP server
     final httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
-    print('✅ Server listening on http://localhost:8080');
+    appLog.info('✅ Server listening on http://localhost:8080');
     
     // Handle HTTP requests
     await for (final request in httpServer) {
       _handleHttpRequest(server, request);
     }
   } catch (e) {
-    print('❌ Failed to start HTTP server: $e');
+    appLog.info('❌ Failed to start HTTP server: $e');
     exit(1);
   }
 }
@@ -1265,7 +1270,7 @@ void _handleHttpRequest(Server server, HttpRequest request) async {
     final body = await utf8.decoder.bind(request).join();
     final jsonRpcRequest = jsonDecode(body);
     
-    print('📨 Received request: ${jsonRpcRequest['method']}');
+    appLog.info('📨 Received request: ${jsonRpcRequest['method']}');
     
     // Process with server (this is simplified - real implementation would be more complex)
     final response = await _processJsonRpcRequest(server, jsonRpcRequest);

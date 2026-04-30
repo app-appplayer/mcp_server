@@ -515,6 +515,17 @@ class PromptArgument {
     this.defaultValue,
   });
 
+  /// Construct from the spec JSON shape — convenient for callers that
+  /// don't want to import this typed class (e.g., generic adapters).
+  factory PromptArgument.fromJson(Map<String, dynamic> json) {
+    return PromptArgument(
+      name: json['name'] as String,
+      description: (json['description'] ?? '') as String,
+      required: (json['required'] ?? false) as bool,
+      defaultValue: json['default'] as String?,
+    );
+  }
+
   Map<String, dynamic> toJson() {
     final result = {
       'name': name,

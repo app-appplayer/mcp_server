@@ -206,8 +206,8 @@ void main() {
       server.removeCompletion(refType: 'prompt', refKey: 'greet');
     });
 
-    test('configureProtectedResource exposes RFC 9728 metadata only when '
-        'auth is enabled', () {
+    test('configureProtectedResource exposes RFC 9728 metadata when '
+        'configured (independent of `enableAuthentication`)', () {
       final server = Server(
         name: 'oauth-rs-test',
         version: '1.0.0',
@@ -215,12 +215,25 @@ void main() {
       );
       addTearDown(server.dispose);
 
-      // Without auth enabled, metadata is null even if configured.
+      // Earlier the getter required `enableAuthentication` to have been
+      // called too, but real deployments enforce auth at the transport
+      // (`StreamableHttpServerConfig.authToken`) and the metadata is
+      // *informational* — clients fetch it precisely to discover where
+      // to obtain a token, so gating the metadata on the middleware
+      // breaks transports that handle auth themselves.
+      expect(server.protectedResourceMetadata, isNull,
+          reason: 'no metadata until configureProtectedResource is called');
+
       server.configureProtectedResource(
         resource: 'https://api.example.com/mcp',
         authorizationServers: const ['https://auth.example.com'],
       );
-      expect(server.protectedResourceMetadata, isNull);
+
+      expect(server.protectedResourceMetadata, isNotNull);
+      expect(server.protectedResourceMetadata!['resource'],
+          equals('https://api.example.com/mcp'));
+      expect(server.protectedResourceMetadata!['authorization_servers'],
+          equals(['https://auth.example.com']));
     });
   });
 }
