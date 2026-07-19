@@ -28,6 +28,14 @@ class ServerCapabilities {
   /// Progress support capabilities
   final ProgressCapability? progress;
 
+  /// Extensions framework (MCP 2026-07-28). Keys are reverse-DNS extension
+  /// identifiers (e.g. `io.modelcontextprotocol/tasks`, following the `_meta`
+  /// key naming rules with a mandatory prefix); values are per-extension
+  /// settings objects (an empty object = supported with no settings).
+  /// Advertised via `server/discover` / initialize `capabilities.extensions`.
+  /// Additive — absent/empty for peers that do not use extensions.
+  final Map<String, Map<String, dynamic>>? extensions;
+
   const ServerCapabilities({
     this.tools,
     this.resources,
@@ -37,7 +45,12 @@ class ServerCapabilities {
     this.sampling,
     this.roots,
     this.progress,
+    this.extensions,
   });
+
+  /// Whether this capability set advertises the extension [id]
+  /// (reverse-DNS key), e.g. `io.modelcontextprotocol/tasks`.
+  bool hasExtension(String id) => extensions?.containsKey(id) ?? false;
 
   /// Convert capabilities to JSON
   Map<String, dynamic> toJson() {
@@ -74,7 +87,11 @@ class ServerCapabilities {
     if (progress != null) {
       result['progress'] = progress!.toJson();
     }
-    
+
+    if (extensions != null && extensions!.isNotEmpty) {
+      result['extensions'] = extensions;
+    }
+
     return result;
   }
 

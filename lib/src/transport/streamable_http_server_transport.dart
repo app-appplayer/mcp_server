@@ -9,9 +9,23 @@ import 'package:meta/meta.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../logger.dart';
+import '../protocol/protocol.dart';
+import '../protocol/request_meta.dart';
 import 'transport.dart';
 
 final Logger _logger = Logger('mcp_server.streamable_http_server_transport');
+
+/// HTTP header carrying the MCP protocol version (2025-06-18+, and the sole
+/// version signal on the 2026-07-28 stateless path).
+const String mcpProtocolVersionHeader = 'mcp-protocol-version';
+
+/// JSON-RPC error code: request `_meta.protocolVersion` disagrees with the
+/// `MCP-Protocol-Version` header (2026-07-28 `HeaderMismatchError`).
+const int _headerMismatch = -32020;
+
+/// JSON-RPC error code: requested protocol version is unknown/unsupported
+/// (2026-07-28 `UnsupportedProtocolVersionError`).
+const int _unsupportedProtocolVersion = -32022;
 
 // MCP StreamableHTTP Headers
 const String mcpSessionIdHeader = 'mcp-session-id';
@@ -63,6 +77,42 @@ class StreamableHttpServerConfig {
   /// When false, server returns 405 Method Not Allowed for GET requests
   final bool enableGetStream;
 
+  /// Allowed `Origin` header values for DNS-rebinding protection
+  /// (MCP 2025-11-25 requires HTTP 403 Forbidden for invalid `Origin`
+  /// headers on the Streamable HTTP transport).
+  ///
+  /// When non-null, a request that carries an `Origin` header whose value
+  /// is not in this list is rejected with `403 Forbidden` before dispatch.
+  /// Requests without an `Origin` header (non-browser clients) are not
+  /// affected. When null (default), `Origin` is not enforced — preserving
+  /// prior behavior for existing deployments (opt-in hardening).
+  final List<String>? allowedOrigins;
+
+  /// Space-delimited OAuth scope advertised on the `WWW-Authenticate`
+  /// challenge emitted with a `401 Unauthorized` (MCP 2025-11-25 incremental
+  /// scope consent / step-up, SEP-835). When non-null AND OAuth Protected
+  /// Resource metadata is configured (`Server.configureProtectedResource`),
+  /// the challenge carries `scope="<value>"` so the client knows which scopes
+  /// to request when (re-)authorizing. Omitted (per spec) when null — the
+  /// required scope is then "unknown" and not advertised. Backward compatible:
+  /// no effect unless PRM is configured and a 401 is emitted.
+  final String? challengeScope;
+
+  /// Opt-in for the 2026-07-28 stateless core (SEP-2577). Default **false**:
+  /// 2026-07-28 is neither served nor advertised, and a request carrying
+  /// `MCP-Protocol-Version: 2026-07-28` is rejected with an
+  /// `UnsupportedProtocolVersionError` (JSON-RPC `-32022`, HTTP 400) — so
+  /// there is ZERO behavior change from prior deployments.
+  ///
+  /// When true, a POST carrying `MCP-Protocol-Version: 2026-07-28` AND no
+  /// `Mcp-Session-Id` is routed down the stateless branch: no session is
+  /// created, client info/caps are read from the per-request `_meta`, and
+  /// `server/discover` is served. Legacy handshake requests (and any request
+  /// that carries a session id) keep the existing path unchanged, so one
+  /// endpoint answers both revisions (matches the spec's own SDK approach:
+  /// Go `StreamableHTTPOptions.Stateless`, Python "answers both revisions").
+  final bool enableStateless;
+
   const StreamableHttpServerConfig({
     this.endpoint = '/mcp',
     this.host = 'localhost',
@@ -75,6 +125,9 @@ class StreamableHttpServerConfig {
     this.jsonResponseMode = 'sync', // Default to synchronous JSON responses
     this.authToken, // Optional Bearer token for authentication
     this.enableGetStream = true, // Default: enabled per MCP 2025-03-26
+    this.allowedOrigins, // Optional DNS-rebinding protection (opt-in)
+    this.challengeScope, // Optional WWW-Authenticate scope (SEP-835)
+    this.enableStateless = false, // Opt-in 2026-07-28 stateless core (dormant)
   });
 }
 
@@ -94,12 +147,26 @@ class CorsConfig {
   });
 }
 
-/// Event message with optional ID for SSE
+/// Event message with optional ID for SSE.
+///
+/// [forGetStream] marks events that were delivered on a session's standalone
+/// GET SSE stream (server-initiated notifications / broadcasts) — these are
+/// the events eligible for replay when a client reconnects the GET stream
+/// with a `Last-Event-ID`. Per-request POST responses are stored too (for
+/// event-id continuity) but are not replayed on a GET reconnect.
+/// [targetSessionId] is null for broadcast events.
 class EventMessage {
   final Map<String, dynamic> message;
   final String? eventId;
-  
-  EventMessage({required this.message, this.eventId});
+  final bool forGetStream;
+  final String? targetSessionId;
+
+  EventMessage({
+    required this.message,
+    this.eventId,
+    this.forGetStream = false,
+    this.targetSessionId,
+  });
 }
 
 /// SSE stream information for request-specific streams
@@ -134,7 +201,40 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   // Completers for synchronous JSON mode
   final Map<dynamic, Completer<Map<String, dynamic>>> _pendingCompleters = {};
-  
+
+  // Completers for one-shot 2026-07-28 stateless requests. Kept separate from
+  // `_pendingCompleters` so the stateless response path is independent of the
+  // JSON/SSE response-mode config — a stateless request always resolves here
+  // regardless of `isJsonResponseEnabled`. Dormant unless `enableStateless`.
+  final Map<dynamic, Completer<Map<String, dynamic>>> _statelessCompleters = {};
+
+  // Completers for JSON-RPC batch entries (2024-11-05 / 2025-03-26; batching
+  // was removed in 2025-06-18). Kept separate from `_pendingCompleters` so a
+  // batched request resolves here regardless of `isJsonResponseEnabled` — the
+  // whole batch is answered as one JSON array (spec-compliant). Empty unless a
+  // batch is in flight.
+  final Map<dynamic, Completer<Map<String, dynamic>>> _batchCompleters = {};
+
+  // Resolves a session's negotiated protocol revision, injected by
+  // `Server.connect`. Lets the transport version-gate JSON-RPC batching (a
+  // transport concern, since assembling the array response lives here) using
+  // the same source of truth the server dispatch uses. Null until wired.
+  String? Function(String sessionId)? _negotiatedVersionResolver;
+
+  /// Injected by [Server] on `connect` so the transport can version-gate
+  /// JSON-RPC batching on the session's negotiated protocol revision.
+  void setNegotiatedVersionResolver(String? Function(String sessionId) r) {
+    _negotiatedVersionResolver = r;
+  }
+
+  // Long-lived SSE streams for 2026-07-28 stateless `subscriptions/listen`
+  // (SEP-2577), keyed by the listen request's JSON-RPC id (== the
+  // subscriptionId). Notifications carrying `_meta.subscriptionId` and the
+  // terminal `SubscriptionsListenResult` (response id == subscriptionId) are
+  // routed here by `send()`. Dormant unless `enableStateless`.
+  final Map<dynamic, StreamController<String>> _statelessSubscriptionStreams =
+      {};
+
   // Response store for asynchronous JSON mode
   final Map<String, Map<String, dynamic>> _responseStore = {};
   final Map<String, DateTime> _responseTimestamps = {};
@@ -313,6 +413,21 @@ class StreamableHttpServerTransport implements ServerTransport {
     try {
       // Session termination is now checked per-session in _validateSession()
 
+      // DNS-rebinding protection (MCP 2025-11-25): reject a request whose
+      // `Origin` header is present but not allow-listed with 403 Forbidden,
+      // before any dispatch. Opt-in — enforced only when `allowedOrigins`
+      // is configured; requests without an `Origin` header are unaffected.
+      if (!_isOriginAllowed(request)) {
+        _setCorsHeaders(request.response);
+        _sendErrorResponse(
+          request.response,
+          '',
+          'Forbidden: Origin not allowed',
+          HttpStatus.forbidden,
+        );
+        return;
+      }
+
       // Normalize paths to handle trailing slashes
       final requestPath = request.uri.path.endsWith('/') && request.uri.path.length > 1
           ? request.uri.path.substring(0, request.uri.path.length - 1)
@@ -425,6 +540,25 @@ class StreamableHttpServerTransport implements ServerTransport {
       return;
     }
 
+    // 2026-07-28 stateless-core routing (SEP-2577). A POST carrying
+    // `MCP-Protocol-Version: 2026-07-28` and NO `Mcp-Session-Id` is a
+    // stateless request. Ambiguity guard: a request that ALSO carries a
+    // session id is treated as legacy (session wins), so it falls through.
+    final protoHeader = request.headers.value(mcpProtocolVersionHeader);
+    final incomingSessionId = request.headers.value(mcpSessionIdHeader);
+    final hasSessionId =
+        incomingSessionId != null && incomingSessionId.isNotEmpty;
+    if (protoHeader == McpProtocol.v2026_07_28 && !hasSessionId) {
+      if (!config.enableStateless) {
+        // Version gate: 2026-07-28 is not served when the flag is off — the
+        // client should fall back to the `initialize` handshake.
+        await _sendUnsupportedProtocolVersion(request.response, protoHeader!);
+        return;
+      }
+      await _handleStatelessPostRequest(request);
+      return;
+    }
+
     // Extract or create session ID
     final sessionId = _getOrCreateSessionId(request);
 
@@ -476,9 +610,9 @@ class StreamableHttpServerTransport implements ServerTransport {
       return;
     }
 
-    Map<String, dynamic> jsonRpcRequest;
+    final dynamic decoded;
     try {
-      jsonRpcRequest = jsonDecode(body) as Map<String, dynamic>;
+      decoded = jsonDecode(body);
     } catch (e) {
       _sendJsonRpcError(
         request.response,
@@ -490,6 +624,32 @@ class StreamableHttpServerTransport implements ServerTransport {
       );
       return;
     }
+
+    // JSON-RPC batching (a JSON array of messages) is valid only on
+    // 2024-11-05 / 2025-03-26 (removed in 2025-06-18). Assembling the batched
+    // array response is a transport concern, so it is handled here rather than
+    // in `Server._handleMessage` (which owns the batch path for stdio).
+    if (decoded is List) {
+      await _handleBatchRequest(request, decoded, sessionId);
+      return;
+    }
+    if (decoded is! Map<String, dynamic>) {
+      _sendJsonRpcError(
+        request.response,
+        sessionId,
+        null,
+        -32600,
+        'Invalid Request',
+        'Not a valid JSON-RPC 2.0 request',
+      );
+      return;
+    }
+    final Map<String, dynamic> jsonRpcRequest = decoded;
+    // Reserved transport control keys are set by the transport, never by the
+    // client. Strip any forged ones so a request body cannot inject
+    // `_stateless` (which would otherwise reach the server's stateless router)
+    // or spoof `_sessionId` / `_protocolVersion`.
+    _stripReservedKeys(jsonRpcRequest);
 
     // Validate JSON-RPC format
     if (!_isValidJsonRpc(jsonRpcRequest)) {
@@ -550,8 +710,338 @@ class StreamableHttpServerTransport implements ServerTransport {
       await _handleSseResponse(request, wrappedMessage, sessionId);
     }
   }
-  
+
+  /// Handle a 2026-07-28 stateless-core POST (opt-in via `enableStateless`).
+  ///
+  /// No session is created or registered: the request rides its own client
+  /// info/caps in `_meta`, and the response is a single JSON body (no SSE, no
+  /// `Mcp-Session-Id`). The transient session id exists only to route the
+  /// server's reply back through [send] via [_statelessCompleters].
+  Future<void> _handleStatelessPostRequest(HttpRequest request) async {
+    if (!_validateAcceptHeaders(request)) {
+      await _sendUnroutedError(request.response, HttpStatus.notAcceptable,
+          'Not Acceptable: Client must accept both application/json and text/event-stream');
+      return;
+    }
+    if (!_validateContentType(request)) {
+      await _sendUnroutedError(request.response, HttpStatus.unsupportedMediaType,
+          'Unsupported Media Type: Content-Type must be application/json');
+      return;
+    }
+
+    final body = await utf8.decoder
+        .bind(request)
+        .join()
+        .timeout(config.requestTimeout);
+    if (body.length > config.maxRequestSize) {
+      await _sendUnroutedError(
+          request.response, HttpStatus.requestEntityTooLarge, 'Request Too Large');
+      return;
+    }
+
+    Map<String, dynamic> jsonRpcRequest;
+    try {
+      jsonRpcRequest = jsonDecode(body) as Map<String, dynamic>;
+    } catch (e) {
+      _sendJsonRpcError(
+          request.response, '', null, -32700, 'Parse error', 'Invalid JSON: $e');
+      return;
+    }
+    // Strip client-forged reserved control keys; this path sets the legitimate
+    // `_stateless` / `_protocolVersion` / `_sessionId` itself, from the route
+    // and the `MCP-Protocol-Version` header.
+    _stripReservedKeys(jsonRpcRequest);
+    if (!_isValidJsonRpc(jsonRpcRequest)) {
+      _sendJsonRpcError(request.response, '', null, -32600, 'Invalid Request',
+          'Not a valid JSON-RPC 2.0 request');
+      return;
+    }
+
+    final protoHeader = request.headers.value(mcpProtocolVersionHeader)!;
+
+    // Schema: for HTTP the request `_meta.protocolVersion` MUST equal the
+    // `MCP-Protocol-Version` header; otherwise 400 (HeaderMismatchError,
+    // -32020). A stateless request also MUST declare `clientCapabilities`.
+    final meta = (jsonRpcRequest['params'] is Map)
+        ? (jsonRpcRequest['params'] as Map)['_meta']
+        : null;
+    final metaVersion = McpRequestMeta.readProtocolVersion(meta);
+    if (metaVersion != null && metaVersion != protoHeader) {
+      _sendJsonRpcErrorStatus(
+        request.response,
+        jsonRpcRequest['id'],
+        _headerMismatch,
+        'Header mismatch',
+        HttpStatus.badRequest,
+        data:
+            'Request _meta.protocolVersion ($metaVersion) does not match MCP-Protocol-Version header ($protoHeader)',
+      );
+      return;
+    }
+
+    // A transient, unregistered session id — never added to `_activeSessions`.
+    final ephemeralId = _generateSessionId();
+    final wrappedMessage = <String, dynamic>{
+      ...jsonRpcRequest,
+      '_sessionId': ephemeralId,
+      '_stateless': true,
+      '_protocolVersion': protoHeader,
+    };
+
+    // 2026-07-28 `subscriptions/listen` (SEP-2577): a long-lived SSE stream
+    // replaces the old HTTP GET SSE endpoint. Open the stream keyed by the
+    // request id (== subscriptionId) and let the server drive it (acknowledged
+    // notification first, then filtered notifications, then the terminal
+    // `SubscriptionsListenResult` on teardown/cancel).
+    if (jsonRpcRequest['method'] == 'subscriptions/listen' &&
+        jsonRpcRequest['id'] != null) {
+      await _handleStatelessSubscribe(request, wrappedMessage);
+      return;
+    }
+
+    // Notifications / responses on the stateless path: enqueue and 202.
+    final id = jsonRpcRequest['id'];
+    final isResponse = jsonRpcRequest['method'] is! String &&
+        (jsonRpcRequest.containsKey('result') ||
+            jsonRpcRequest['error'] is Map);
+    if (id == null || isResponse) {
+      if (!_messageController.isClosed) {
+        _messageController.add(wrappedMessage);
+      }
+      request.response.statusCode = HttpStatus.accepted;
+      request.response.headers.set('Content-Type', contentTypeJson);
+      request.response.headers.set('Content-Length', '0');
+      await request.response.close();
+      return;
+    }
+
+    final completer = Completer<Map<String, dynamic>>();
+    _statelessCompleters[id] = completer;
+    if (!_messageController.isClosed) {
+      _messageController.add(wrappedMessage);
+    }
+
+    try {
+      final response = await completer.future.timeout(
+        config.requestTimeout,
+        onTimeout: () => throw TimeoutException('Request timeout'),
+      );
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers
+          .set('Content-Type', 'application/json; charset=utf-8');
+      // Echo the protocol version; deliberately NO `Mcp-Session-Id` (stateless).
+      request.response.headers.set(mcpProtocolVersionHeader, protoHeader);
+      // B1f (SEP-2577): propagate W3C Trace Context back to the caller when the
+      // request carried it (additive; absent → no header).
+      _propagateTraceContext(request, request.response);
+      request.response.add(utf8.encode(json.encode(response)));
+      await request.response.close();
+    } on TimeoutException {
+      _statelessCompleters.remove(id);
+      _sendJsonRpcErrorStatus(request.response, id, -32603, 'Request timeout',
+          HttpStatus.gatewayTimeout);
+    }
+  }
+
+  /// B1f (SEP-2577): propagate W3C Trace Context (`traceparent`/`tracestate`/
+  /// `baggage`) from an inbound stateless [request] onto its [response] when
+  /// present. Additive and header-name-cased per the W3C spec; a request without
+  /// trace context yields no headers.
+  void _propagateTraceContext(HttpRequest request, HttpResponse response) {
+    for (final h in const ['traceparent', 'tracestate', 'baggage']) {
+      final v = request.headers.value(h);
+      if (v != null && v.isNotEmpty) {
+        response.headers.set(h, v);
+      }
+    }
+  }
+
+  /// Open the long-lived SSE stream for a 2026-07-28 `subscriptions/listen`
+  /// request (SEP-2577). The stream is keyed by the request id (the
+  /// subscriptionId). The server delivers the acknowledged notification,
+  /// filtered stream notifications, and the terminal `SubscriptionsListenResult`
+  /// through [send], which routes them here by `_meta.subscriptionId` (for
+  /// notifications) or by response id. The stream stays open until the server
+  /// closes it (graceful teardown / cancellation) or the client disconnects.
+  Future<void> _handleStatelessSubscribe(
+      HttpRequest request, Map<String, dynamic> wrappedMessage) async {
+    final subscriptionId = wrappedMessage['id'];
+
+    request.response.statusCode = HttpStatus.ok;
+    request.response.headers.set('Content-Type', contentTypeSse);
+    request.response.headers.set('Cache-Control', 'no-cache, no-transform');
+    request.response.headers.set('Connection', 'keep-alive');
+    // Stateless: deliberately NO `Mcp-Session-Id`; echo the protocol version.
+    request.response.headers.set(
+        mcpProtocolVersionHeader, wrappedMessage['_protocolVersion'] as String);
+    _propagateTraceContext(request, request.response);
+    // Disable output buffering so each SSE event is written to the socket
+    // immediately (a long-lived stream must not wait for the buffer to fill).
+    request.response.bufferOutput = false;
+
+    final controller = StreamController<String>();
+    _statelessSubscriptionStreams[subscriptionId] = controller;
+
+    controller.stream.listen(
+      (data) {
+        request.response.add(utf8.encode(data));
+        // Long-lived SSE: flush each event immediately so the client sees it
+        // live (a buffered response would only surface events on close).
+        unawaited(request.response.flush());
+      },
+      onDone: () async {
+        try {
+          await request.response.close();
+        } catch (_) {}
+        _statelessSubscriptionStreams.remove(subscriptionId);
+      },
+      onError: (_) => _statelessSubscriptionStreams.remove(subscriptionId),
+    );
+
+    // Clean up if the client disconnects before graceful teardown.
+    unawaited(request.response.done.whenComplete(() {
+      if (_statelessSubscriptionStreams.remove(subscriptionId) != null &&
+          !controller.isClosed) {
+        controller.close();
+      }
+    }));
+
+    // Route into the server so it can register the subscription + acknowledge.
+    if (!_messageController.isClosed) {
+      _messageController.add(wrappedMessage);
+    }
+  }
+
+  /// Emit an `UnsupportedProtocolVersionError` (-32022, HTTP 400) — the
+  /// server does not support the requested protocol version.
+  Future<void> _sendUnsupportedProtocolVersion(
+      HttpResponse response, String requested) async {
+    response.statusCode = HttpStatus.badRequest;
+    response.headers.set('Content-Type', 'application/json; charset=utf-8');
+    final payload = {
+      'jsonrpc': '2.0',
+      'id': null,
+      'error': {
+        'code': _unsupportedProtocolVersion,
+        'message': 'Unsupported protocol version',
+        'data': {
+          'supported': McpProtocol.supportedVersions,
+          'requested': requested,
+        },
+      },
+    };
+    response.add(utf8.encode(jsonEncode(payload)));
+    await response.close();
+  }
+
+  /// Write a JSON-RPC error with a specific HTTP status code.
+  void _sendJsonRpcErrorStatus(HttpResponse response, dynamic id, int code,
+      String message, int status,
+      {Object? data}) {
+    response.statusCode = status;
+    response.headers.set('Content-Type', 'application/json; charset=utf-8');
+    final payload = {
+      'jsonrpc': '2.0',
+      if (id != null) 'id': id,
+      'error': {
+        'code': code,
+        'message': message,
+        if (data != null) 'data': data,
+      },
+    };
+    response.add(utf8.encode(jsonEncode(payload)));
+    response.close();
+  }
+
+  /// Write a plain non-JSON-RPC HTTP error (used before a JSON-RPC id is
+  /// known on the stateless path).
+  Future<void> _sendUnroutedError(
+      HttpResponse response, int status, String message) async {
+    response.statusCode = status;
+    response.headers.set('Content-Type', 'text/plain; charset=utf-8');
+    response.write(message);
+    await response.close();
+  }
+
   /// Handle synchronous JSON response mode
+  /// Handle a JSON-RPC batch POST (an array of messages).
+  ///
+  /// Batching is valid only for sessions that negotiated 2024-11-05 /
+  /// 2025-03-26 (removed in 2025-06-18); otherwise it is rejected with -32600
+  /// (a valid array that the negotiated revision forbids — not a parse error).
+  /// Each entry is dispatched individually and the responses for entries that
+  /// are *requests* are collected into a single JSON array. Notification-only
+  /// batches get 202 Accepted. Independent of `isJsonResponseEnabled`.
+  Future<void> _handleBatchRequest(
+      HttpRequest request, List<dynamic> batch, String sessionId) async {
+    final negotiated = _negotiatedVersionResolver?.call(sessionId);
+    final allow = negotiated != null && McpProtocol.supportsBatching(negotiated);
+    if (!allow) {
+      _sendJsonRpcError(
+        request.response,
+        sessionId,
+        null,
+        -32600,
+        'Invalid Request',
+        'JSON-RPC batching is not supported on protocol '
+            '${negotiated ?? 'unnegotiated'} (removed in 2025-06-18)',
+      );
+      return;
+    }
+    if (batch.isEmpty) {
+      _sendJsonRpcError(request.response, sessionId, null, -32600,
+          'Invalid Request', 'Empty JSON-RPC batch');
+      return;
+    }
+
+    final requestIds = <dynamic>[];
+    for (final item in batch) {
+      if (item is! Map<String, dynamic>) continue;
+      _stripReservedKeys(item);
+      final isRequest = item['method'] is String && item['id'] != null;
+      if (isRequest) {
+        _batchCompleters[item['id']] = Completer<Map<String, dynamic>>();
+        requestIds.add(item['id']);
+      }
+      if (!_messageController.isClosed) {
+        _messageController.add({...item, '_sessionId': sessionId});
+      }
+    }
+
+    // Notification-only batch: nothing to answer.
+    if (requestIds.isEmpty) {
+      request.response.statusCode = HttpStatus.accepted;
+      request.response.headers.set('Content-Type', contentTypeJson);
+      request.response.headers.set('Content-Length', '0');
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
+      await request.response.close();
+      return;
+    }
+
+    try {
+      final responses = <Map<String, dynamic>>[];
+      for (final id in requestIds) {
+        responses.add(await _batchCompleters[id]!.future.timeout(
+              config.requestTimeout,
+              onTimeout: () => throw TimeoutException('Batch request timeout'),
+            ));
+      }
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers
+          .set('Content-Type', 'application/json; charset=utf-8');
+      request.response.headers.set(mcpSessionIdHeader, sessionId);
+      request.response.add(utf8.encode(json.encode(responses)));
+      await request.response.close();
+    } catch (e) {
+      _sendJsonRpcError(request.response, sessionId, null, -32603,
+          'Internal error', 'Batch processing error: $e');
+    } finally {
+      for (final id in requestIds) {
+        _batchCompleters.remove(id);
+      }
+    }
+  }
+
   Future<void> _handleSyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
 
@@ -961,11 +1451,23 @@ class StreamableHttpServerTransport implements ServerTransport {
     final authHeader = request.headers.value('Authorization');
     if (authHeader == null || authHeader != 'Bearer ${config.authToken}') {
       _logger.debug('Bearer token validation failed - expected: Bearer ${config.authToken}, got: $authHeader');
+      // MCP 2025-11-25 (RFC 9728 / SEP-985 / SEP-835): when OAuth Protected
+      // Resource metadata is configured, a 401 MUST advertise where the client
+      // can discover the authorization server(s) via
+      // `WWW-Authenticate: Bearer resource_metadata="…"` (+ optional `scope=`
+      // for step-up). Absent PRM, the challenge is omitted (prior behavior).
+      final missing = authHeader == null;
       _sendErrorResponse(
         request.response,
         '',
         'Unauthorized: Invalid or missing Bearer token',
         HttpStatus.unauthorized,
+        wwwAuthenticate: _buildBearerChallenge(
+          error: missing ? null : 'invalid_token',
+          errorDescription: missing
+              ? 'Authentication required'
+              : 'Invalid or missing Bearer token',
+        ),
       );
       return false;
     }
@@ -975,14 +1477,77 @@ class StreamableHttpServerTransport implements ServerTransport {
   }
   
   /// Replay events after a given event ID (simplified implementation)
-  Future<void> _replayEvents(HttpRequest request, String lastEventId, String sessionId) async {
-    // For now, return a simple error - full implementation would replay stored events
-    _sendErrorResponse(
-      request.response,
-      sessionId,
-      'Bad Request: Event resumption not fully implemented',
-      HttpStatus.badRequest,
+  /// Resume a session's standalone GET SSE stream after a disconnect
+  /// (SEP-1699). The client reconnects with `Last-Event-ID: N`; the server
+  /// opens a fresh SSE stream, replays every stored GET-stream event for this
+  /// session with a numeric id greater than N (in id order), then keeps the
+  /// stream open for live events. Event ids are monotonic and encode ordering
+  /// so the client resumes exactly where it left off with no gaps or dupes.
+  Future<void> _replayEvents(
+      HttpRequest request, String lastEventId, String sessionId) async {
+    final lastId = int.tryParse(lastEventId);
+    if (lastId == null) {
+      _sendErrorResponse(
+        request.response,
+        sessionId,
+        'Bad Request: invalid Last-Event-ID',
+        HttpStatus.badRequest,
+      );
+      return;
+    }
+
+    // Establish a fresh SSE stream for this session (mirrors the normal GET
+    // path) so live events continue after the replay.
+    request.response.headers.set('Content-Type', contentTypeSse);
+    request.response.headers.set('Cache-Control', 'no-cache, no-transform');
+    request.response.headers.set('Connection', 'keep-alive');
+    request.response.headers.set(mcpSessionIdHeader, sessionId);
+    request.response.bufferOutput = false;
+
+    final sseController = StreamController<String>();
+    _getStreams[sessionId] = SseStreamInfo(
+      controller: sseController,
+      response: request.response,
     );
+    sseController.stream.listen(
+      (data) => request.response.add(utf8.encode(data)),
+      onDone: () async {
+        await request.response.close();
+        _getStreams.remove(sessionId);
+      },
+      onError: (error) {
+        _logger.error('Resumed GET SSE stream error for $sessionId: $error');
+        _getStreams.remove(sessionId);
+      },
+    );
+    request.response.done.then((_) {
+      _getStreams[sessionId]?.controller.close();
+      _getStreams.remove(sessionId);
+    }).catchError((error) {
+      _logger.error('Error in resumed response.done for $sessionId: $error');
+      _getStreams.remove(sessionId);
+    });
+
+    // Replay stored GET-stream events for this session after `lastId`,
+    // ordered by numeric event id. Broadcasts (null target) and events
+    // targeted at this session are eligible; per-request POST responses and
+    // other sessions' targeted events are not.
+    final replay = _eventStore.entries
+        .where((e) {
+          final id = int.tryParse(e.key);
+          return id != null && id > lastId;
+        })
+        .where((e) =>
+            e.value.forGetStream &&
+            (e.value.targetSessionId == null ||
+                e.value.targetSessionId == sessionId))
+        .toList()
+      ..sort((a, b) => int.parse(a.key).compareTo(int.parse(b.key)));
+
+    for (final entry in replay) {
+      _sendSseEvent(sseController, entry.value.message,
+          eventId: entry.value.eventId);
+    }
   }
   
   /// Validate that the message is a JSON-RPC 2.0 envelope.
@@ -996,6 +1561,23 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// rejected client → server responses to outbound server-initiated
   /// requests (sampling/createMessage etc.) — the response then sat
   /// dropped while the originating tool waited for a reply.
+  /// Reserved transport-internal control keys the transport sets on messages
+  /// it hands to the server. A client must never be able to supply them, so
+  /// they are stripped from decoded client input at every ingestion boundary
+  /// (in particular `_stateless`, which routes to the 2026-07-28 stateless
+  /// handler).
+  static const _reservedControlKeys = {
+    '_stateless',
+    '_protocolVersion',
+    '_sessionId',
+  };
+
+  void _stripReservedKeys(Map<String, dynamic> message) {
+    for (final k in _reservedControlKeys) {
+      message.remove(k);
+    }
+  }
+
   bool _isValidJsonRpc(Map<String, dynamic> message) {
     if (message['jsonrpc'] != '2.0') return false;
     final hasMethod = message['method'] is String;
@@ -1007,6 +1589,80 @@ class StreamableHttpServerTransport implements ServerTransport {
     return false;
   }
   
+  /// DNS-rebinding protection (MCP 2025-11-25). Returns `true` when the
+  /// request may proceed:
+  /// - always `true` when `config.allowedOrigins` is null (enforcement off);
+  /// - always `true` when the request carries no `Origin` header
+  ///   (non-browser clients are not subject to rebinding);
+  /// - otherwise `true` only if the `Origin` value is in the allow-list.
+  bool _isOriginAllowed(HttpRequest request) {
+    final allowed = config.allowedOrigins;
+    if (allowed == null) return true;
+    final origin = request.headers.value('origin');
+    if (origin == null) return true;
+    return allowed.contains(origin);
+  }
+
+  /// Build the `WWW-Authenticate: Bearer …` challenge for a 401 response
+  /// (RFC 9728 / SEP-985, incremental scope SEP-835).
+  ///
+  /// Returns `null` when no OAuth Protected Resource metadata is configured —
+  /// in that case the transport emits a bare 401 with no challenge, preserving
+  /// prior behavior. When PRM is configured, the challenge always carries
+  /// `resource_metadata="<url>"` pointing at the well-known document
+  /// (`<resource>/.well-known/oauth-protected-resource`) so the client can
+  /// discover the authorization server(s). `error`/`error_description` and a
+  /// config-driven `scope` (SEP-835) are appended when available.
+  String? _buildBearerChallenge({String? error, String? errorDescription}) {
+    final prm = _protectedResourceMetadataProvider?.call();
+    if (prm == null) return null;
+
+    final resource = prm['resource'] as String?;
+    final rmUrl = _resourceMetadataUrl(resource);
+
+    final params = <String>['resource_metadata="$rmUrl"'];
+    if (error != null) params.add('error="$error"');
+    if (errorDescription != null) {
+      params.add('error_description="$errorDescription"');
+    }
+    // SEP-835 incremental scope: advertise only when explicitly configured —
+    // PRM `scopes_supported` is the *supported* set, not necessarily the
+    // *required* scope for this request, so it is not auto-advertised here.
+    final scope = config.challengeScope;
+    if (scope != null && scope.isNotEmpty) {
+      params.add('scope="$scope"');
+    }
+    return 'Bearer ${params.join(', ')}';
+  }
+
+  /// Derive the RFC 9728 well-known metadata URL for a resource identifier.
+  ///
+  /// Per RFC 9728 §3.1 the path component `/.well-known/oauth-protected-
+  /// resource` is inserted between the resource's host and any path. For an
+  /// origin-only resource (`https://api.example.com`) this yields
+  /// `https://api.example.com/.well-known/oauth-protected-resource`.
+  String _resourceMetadataUrl(String? resource) {
+    const wellKnown = '/.well-known/oauth-protected-resource';
+    if (resource == null || resource.isEmpty) return wellKnown;
+    final uri = Uri.tryParse(resource);
+    if (uri == null || !uri.hasScheme) {
+      // Fall back to a plain suffix when the value is not a parseable URI.
+      final trimmed = resource.endsWith('/')
+          ? resource.substring(0, resource.length - 1)
+          : resource;
+      return '$trimmed$wellKnown';
+    }
+    final path = uri.path;
+    if (path.isEmpty || path == '/') {
+      return '${uri.origin}$wellKnown';
+    }
+    // Insert the well-known path before the resource path (RFC 9728 §3.1).
+    final normalizedPath = path.endsWith('/')
+        ? path.substring(0, path.length - 1)
+        : path;
+    return '${uri.origin}$wellKnown$normalizedPath';
+  }
+
   /// Set CORS headers
   void _setCorsHeaders(HttpResponse response) {
     response.headers.set('Access-Control-Allow-Origin', config.corsConfig.allowOrigin);
@@ -1016,11 +1672,20 @@ class StreamableHttpServerTransport implements ServerTransport {
   }
   
   /// Send error response
-  void _sendErrorResponse(HttpResponse response, String sessionId, String message, int statusCode) {
+  ///
+  /// [wwwAuthenticate], when non-null, is set as the `WWW-Authenticate`
+  /// response header (RFC 9728 / SEP-985 auth challenge on a 401). It is null
+  /// for every non-auth error path, preserving prior behavior.
+  void _sendErrorResponse(HttpResponse response, String sessionId,
+      String message, int statusCode,
+      {String? wwwAuthenticate}) {
     response.statusCode = statusCode;
     response.headers.set('Content-Type', 'application/json; charset=utf-8');
     if (sessionId.isNotEmpty) {
       response.headers.set(mcpSessionIdHeader, sessionId);
+    }
+    if (wwwAuthenticate != null) {
+      response.headers.set('WWW-Authenticate', wwwAuthenticate);
     }
 
     final error = {
@@ -1060,6 +1725,39 @@ class StreamableHttpServerTransport implements ServerTransport {
     response.close();
   }
   
+  /// Route a server message to an open 2026-07-28 `subscriptions/listen` SSE
+  /// stream (SEP-2577). Returns true if the message was consumed by a
+  /// subscription stream:
+  ///  - a notification whose `params._meta.subscriptionId` names an open stream
+  ///    (stays open), or
+  ///  - a response whose `id` names an open stream (the terminal
+  ///    `SubscriptionsListenResult` → deliver, then close the stream).
+  bool _routeStatelessSubscription(Map message) {
+    final isResponse =
+        message.containsKey('id') && !message.containsKey('method');
+    if (isResponse) {
+      final controller = _statelessSubscriptionStreams[message['id']];
+      if (controller == null) return false;
+      final clean = Map<String, dynamic>.from(message)..remove('_targetSessionId');
+      _sendSseEvent(controller, clean);
+      if (!controller.isClosed) controller.close();
+      _statelessSubscriptionStreams.remove(message['id']);
+      return true;
+    }
+    // Notification: match on `params._meta.subscriptionId`.
+    final params = message['params'];
+    if (params is! Map) return false;
+    final meta = params['_meta'];
+    final subId =
+        meta is Map ? meta['io.modelcontextprotocol/subscriptionId'] : null;
+    if (subId == null) return false;
+    final controller = _statelessSubscriptionStreams[subId];
+    if (controller == null) return false;
+    final clean = Map<String, dynamic>.from(message)..remove('_targetSessionId');
+    _sendSseEvent(controller, clean);
+    return true;
+  }
+
   /// Send SSE event
   void _sendSseEvent(StreamController<String> controller, Map<String, dynamic> data, {String? eventId}) {
     final buffer = StringBuffer();
@@ -1084,9 +1782,18 @@ class StreamableHttpServerTransport implements ServerTransport {
   @override
   void send(dynamic message) {
     if (_isClosed) return;
-    
+
     try {
       _logger.debug('StreamableHTTP send() called with message: $message');
+
+      // 2026-07-28 `subscriptions/listen` (SEP-2577) routing. Route to the
+      // long-lived SSE stream keyed by subscriptionId, BEFORE the normal
+      // response/notification handling below. Legacy paths are unaffected — a
+      // message only matches when its id (terminal result) or its
+      // `_meta.subscriptionId` (stream notification) names an open subscription.
+      if (message is Map && _statelessSubscriptionStreams.isNotEmpty) {
+        if (_routeStatelessSubscription(message)) return;
+      }
 
       // A message is a JSON-RPC RESPONSE only when it has an id AND no
       // method (i.e. it carries `result` or `error`). A server-INITIATED
@@ -1104,7 +1811,29 @@ class StreamableHttpServerTransport implements ServerTransport {
       if (isResponse) {
         final requestId = message['id'];
         _logger.debug('Response ID: $requestId (type: ${requestId.runtimeType})');
-        
+
+        // 2026-07-28 stateless: resolve the one-shot completer independent of
+        // the JSON/SSE response-mode config. Checked first so a stateless
+        // reply never falls into the session-scoped SSE/JSON routing below.
+        final statelessCompleter = _statelessCompleters.remove(requestId);
+        if (statelessCompleter != null) {
+          if (!statelessCompleter.isCompleted) {
+            statelessCompleter.complete(Map<String, dynamic>.from(message));
+          }
+          return;
+        }
+
+        // JSON-RPC batch entry: resolve the batch completer independent of the
+        // response-mode config (the batch is answered as one JSON array in
+        // `_handleBatchRequest`). Checked before the mode-scoped routing below.
+        final batchCompleter = _batchCompleters[requestId];
+        if (batchCompleter != null) {
+          if (!batchCompleter.isCompleted) {
+            batchCompleter.complete(Map<String, dynamic>.from(message));
+          }
+          return;
+        }
+
         // Generate event ID for resumability
         final eventId = (_eventIdCounter++).toString();
         
@@ -1170,9 +1899,13 @@ class StreamableHttpServerTransport implements ServerTransport {
         final cleanMessage = Map<String, dynamic>.from(message);
         final targetSessionId = cleanMessage.remove('_targetSessionId') as String?;
 
+        // GET-stream event (notification / broadcast) — eligible for replay
+        // on a `Last-Event-ID` reconnect. Broadcasts carry a null target.
         _eventStore[eventId] = EventMessage(
           message: cleanMessage,
           eventId: eventId,
+          forGetStream: true,
+          targetSessionId: targetSessionId,
         );
 
         var sent = false;
@@ -1234,6 +1967,12 @@ class StreamableHttpServerTransport implements ServerTransport {
       await stream.controller.close();
     }
     _getStreams.clear();
+
+    // Close any open 2026-07-28 `subscriptions/listen` SSE streams (SEP-2577).
+    for (final controller in _statelessSubscriptionStreams.values) {
+      if (!controller.isClosed) await controller.close();
+    }
+    _statelessSubscriptionStreams.clear();
     
     // Close pending requests and message routers
     for (final pendingRequest in _pendingRequests.values) {

@@ -7,12 +7,24 @@ import '../../logger.dart';
 import '../models/models.dart';
 import '../transport/transport.dart';
 import '../protocol/protocol.dart';
+import '../protocol/request_meta.dart';
+import '../protocol/multi_round_trip.dart';
 import '../protocol/capabilities.dart';
+import '../protocol/tasks.dart';
 import '../middleware/rate_limiter.dart';
 import '../metrics/metrics_collector.dart';
 import '../auth/auth_middleware.dart';
 
 final Logger _logger = Logger('mcp_server.server');
+
+/// B6 (2026-07-28): resource-not-found error code on the stateless path.
+/// Per the authoritative draft schema (`schema/draft/schema.ts`): the legacy
+/// `-32002` (resource not found, ≤2025-11-25) is "replaced by `-32602`"
+/// (`INVALID_PARAMS`) — NOT `-32600`. `InvalidParamsError` covers unknown
+/// tool/prompt/resource on 2026-07-28. Emitted ONLY when the negotiated
+/// version is 2026-07-28; the legacy resource-not-found code and the
+/// prompt-not-found code are left intact for older peers.
+const int _resourceNotFoundStateless = -32602;
 
 /// Callback type for tool execution progress updates
 typedef ProgressCallback = void Function(double progress, String message);
@@ -56,6 +68,17 @@ class Server implements ServerInterface {
   /// Version of the MCP server implementation
   @override
   final String version;
+
+  /// Spec 2025-11-25: optional human-readable description of the server
+  /// (`Implementation.description`). Emitted inside `serverInfo` on
+  /// `initialize` when non-null.
+  final String? description;
+
+  /// Optional natural-language guidance about the server and its features
+  /// (`DiscoverResult.instructions` on 2026-07-28). Surfaced by
+  /// `server/discover` when set; the handshake `initialize` result does not
+  /// carry it. Additive — null by default.
+  final String? instructions;
 
   /// Server capabilities configuration
   @override
@@ -150,6 +173,14 @@ class Server implements ServerInterface {
   final _resourceSubscribedController = StreamController<String>.broadcast();
   final _resourceUnsubscribedController = StreamController<String>.broadcast();
 
+  /// 2026-07-28 `subscriptions/listen` streams (SEP-2577), keyed by the listen
+  /// request's JSON-RPC id (== the subscriptionId), stringified. Held OUTSIDE
+  /// `_sessions` because the subscription is a long-lived notification stream,
+  /// not a protocol session — the transient per-request session that opened it
+  /// is torn down immediately after acknowledgement. Only ever populated on the
+  /// stateless path (dormant unless `enableStateless`).
+  final Map<String, _StatelessSubscription> _statelessSubscriptions = {};
+
   /// Server roots
   final List<Root> _roots = [];
   
@@ -194,6 +225,8 @@ class Server implements ServerInterface {
   Server({
     required this.name,
     required this.version,
+    this.description,
+    this.instructions,
     this.capabilities = const ServerCapabilities(),
   }) {
     _metricsCollector = MetricsCollector();
@@ -232,6 +265,13 @@ class Server implements ServerInterface {
       transport.setProtectedResourceMetadataProvider(
         () => protectedResourceMetadata,
       );
+      // Let the transport version-gate JSON-RPC batching on the session's
+      // negotiated revision (batching valid only ≤ 2025-03-26). The transport
+      // assembles the batched array response; the gate stays anchored to the
+      // same negotiated version the dispatch path uses.
+      transport.setNegotiatedVersionResolver(
+        (sessionId) => _sessions[sessionId]?.negotiatedProtocolVersion,
+      );
     }
 
     // Create initial session only for single-session transports (for backward compatibility)
@@ -242,6 +282,29 @@ class Server implements ServerInterface {
 
     try {
       transport.onMessage.listen((rawMessage) {
+        // 2026-07-28 stateless core: a request the transport flagged
+        // `_stateless` carries no persistent session. Handle it on a
+        // transient, per-request session (client info/caps sourced from
+        // `_meta`) that is torn down after the response — the server keeps
+        // no session state for it.
+        //
+        // SECURITY: `_stateless` is a transport-internal control key. Honor it
+        // ONLY when the connected transport genuinely has stateless enabled,
+        // so a client that forges `_stateless` in its request body cannot
+        // activate the dormant 2026-07-28 path (flag off) over any transport —
+        // stdio/SSE (no stateless support) and a StreamableHTTP transport with
+        // `enableStateless: false` both evaluate to false here. Transports also
+        // strip client-forged reserved keys at ingestion (defense in depth).
+        final t = _transport;
+        final statelessAllowed =
+            t is StreamableHttpServerTransport && t.config.enableStateless;
+        if (rawMessage is Map &&
+            rawMessage['_stateless'] == true &&
+            statelessAllowed) {
+          unawaited(_handleStatelessInbound(rawMessage));
+          return;
+        }
+
         // Extract session ID from message metadata (if present)
         String? messageSessionId;
 
@@ -354,6 +417,56 @@ class Server implements ServerInterface {
     _connectStreamController.add(session);
 
     return sessionId;
+  }
+
+  /// Handle a 2026-07-28 stateless-core inbound message on a transient
+  /// session that holds no persistent state.
+  ///
+  /// The stateless path has no `initialize` handshake: the negotiated version
+  /// comes from the transport's `MCP-Protocol-Version` header (echoed as
+  /// `_protocolVersion`) and the client's capabilities are read from the
+  /// per-request `_meta` (`io.modelcontextprotocol/clientCapabilities`) — the
+  /// server NEVER infers them from a prior request. The transient session is
+  /// registered only so response routing (`_sendResponse` → `transport.send`)
+  /// resolves, and is removed in the `finally` once the handler has replied.
+  Future<void> _handleStatelessInbound(Map rawMessage) async {
+    final sessionId = rawMessage['_sessionId'] as String;
+    final version = rawMessage['_protocolVersion'] as String? ??
+        McpProtocol.v2026_07_28;
+    final message =
+        JsonRpcMessage.fromJson(Map<String, dynamic>.from(rawMessage));
+    message.sessionId = sessionId;
+
+    final session = ClientSession(
+      id: sessionId,
+      connectedAt: DateTime.now(),
+      transport: _transport,
+    );
+    session.isStateless = true;
+    session.isInitialized = true; // no handshake on the stateless path
+    session.negotiatedProtocolVersion = version;
+    // Client caps are per-request from `_meta`; empty object = none.
+    final meta = message.params?['_meta'];
+    session.capabilities =
+        McpRequestMeta.readClientCapabilities(meta) ?? <String, dynamic>{};
+    _sessions[sessionId] = session;
+
+    try {
+      if (message.isRequest) {
+        await _handleRequest(sessionId, message);
+      } else if (message.isNotification) {
+        await _handleNotification(sessionId, message);
+      }
+    } catch (e, stackTrace) {
+      _logger.error('Error processing stateless message: $e');
+      _logger.debug('Stack trace: $stackTrace');
+      if (message.isRequest) {
+        _sendErrorResponse(sessionId, message.id, ErrorCode.internalError,
+            'Internal server error: $e');
+      }
+    } finally {
+      _sessions.remove(sessionId);
+    }
   }
 
   /// Remove a client session
@@ -753,9 +866,6 @@ class Server implements ServerInterface {
 
     if (!isConnected || !capabilities.hasResources) return;
 
-    final subscribers = _resourceSubscriptions[uri];
-    if (subscribers == null || subscribers.isEmpty) return;
-
     // Build notification based on whether content is provided
     final Map<String, dynamic> notification;
     if (content != null) {
@@ -775,6 +885,14 @@ class Server implements ServerInterface {
         'uri': uri,
       };
     }
+
+    // 2026-07-28 (SEP-2577): fan out to `subscriptions/listen` streams whose
+    // filter opted into this URI (independent of the legacy subscribe registry).
+    _fanOutToSubscriptions(
+        'notifications/resources/updated', notification, uri: uri);
+
+    final subscribers = _resourceSubscriptions[uri];
+    if (subscribers == null || subscribers.isEmpty) return;
 
     for (final sessionId in subscribers) {
       if (_sessions.containsKey(sessionId)) {
@@ -1030,6 +1148,14 @@ class Server implements ServerInterface {
         // Spec: client cancels an in-flight request. params: { requestId, reason? }.
         final cancelRequestId = notification.params?['requestId']?.toString();
         if (cancelRequestId != null) {
+          // 2026-07-28 (SEP-2577): a `notifications/cancelled` referencing a
+          // `subscriptions/listen` id terminates that stream (and ONLY that
+          // stream) — deliver the terminal `SubscriptionsListenResult` and drop
+          // the subscription. Otherwise fall through to normal op-cancellation.
+          if (_statelessSubscriptions.containsKey(cancelRequestId)) {
+            _closeSubscription(cancelRequestId);
+            break;
+          }
           for (final op in _pendingOperations.values) {
             if (op.requestId == cancelRequestId && op.sessionId == sessionId) {
               op.isCancelled = true;
@@ -1201,10 +1327,182 @@ class Server implements ServerInterface {
         await _handlePing(sessionId, request);
         break;
 
+      // 2026-07-28 stateless core: on-demand capability/version discovery.
+      // Servers MUST implement it; reachable on both paths (the stateless
+      // branch gates its `supportedVersions` content, see [_handleDiscover]).
+      case 'server/discover':
+        await _handleDiscover(sessionId, request);
+        break;
+
+      // 2026-07-28 stateless core (SEP-2577): long-lived notification stream
+      // that replaces the `resources/subscribe` RPC + the HTTP GET SSE stream.
+      // Stateless path only (a live client-request channel is required).
+      case 'subscriptions/listen':
+        await _handleSubscriptionsListen(sessionId, request);
+        break;
+
+      // Tasks extension (`io.modelcontextprotocol/tasks`, 2026-07-28).
+      // Reachable only when the tasks extension is advertised; otherwise
+      // method-not-found so a non-tasks server is unaffected.
+      case 'tasks/get':
+        await _handleTaskGet(sessionId, request);
+        break;
+      case 'tasks/update':
+        await _handleTaskUpdate(sessionId, request);
+        break;
+      case 'tasks/cancel':
+        await _handleTaskCancel(sessionId, request);
+        break;
+
       default:
         _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound, 'Method not found');
     }
   }
+
+  // ── Tasks extension (io.modelcontextprotocol/tasks, 2026-07-28) ──────────
+  // In-memory task store. Server-directed: application code elects to run a
+  // request as a task via [createTask] and drives it to a terminal state.
+  // Dormant unless the tasks extension is advertised in
+  // `capabilities.extensions` (see [ServerCapabilities.extensions]).
+  final Map<String, Task> _tasks = {};
+
+  bool get _tasksEnabled => capabilities.hasExtension(tasksExtensionId);
+
+  String _nowIso() => DateTime.now().toUtc().toIso8601String();
+
+  /// Create a `working` task and store it. Returns the [Task] handle whose
+  /// [Task.toCreateTaskResult] a `tools/call` (or other) handler can return so
+  /// the client tracks it via `tasks/get`. Server-directed per the spec.
+  Task createTask({String? statusMessage, int? ttlMs, int? pollIntervalMs}) {
+    final now = _nowIso();
+    final task = Task(
+      taskId: Uuid().v4(),
+      status: TaskStatus.working,
+      createdAt: now,
+      lastUpdatedAt: now,
+      statusMessage: statusMessage,
+      ttlMs: ttlMs,
+      pollIntervalMs: pollIntervalMs,
+    );
+    _tasks[task.taskId] = task;
+    return task;
+  }
+
+  /// The current stored [Task] for [taskId], or null.
+  Task? task(String taskId) => _tasks[taskId];
+
+  Task? _transition(String taskId, Task Function(Task) mutate) {
+    final current = _tasks[taskId];
+    if (current == null) return null;
+    final next = mutate(current).copyWith(lastUpdatedAt: _nowIso());
+    _tasks[taskId] = next;
+    return next;
+  }
+
+  /// Drive a task to `completed` with its terminal [result].
+  Task? completeTask(String taskId, Map<String, dynamic> result) =>
+      _transition(taskId,
+          (t) => t.copyWith(status: TaskStatus.completed, result: result));
+
+  /// Drive a task to `failed` with a JSON-RPC [error] object.
+  Task? failTask(String taskId, Map<String, dynamic> error) => _transition(
+      taskId, (t) => t.copyWith(status: TaskStatus.failed, error: error));
+
+  /// Move a task to `input_required`, surfacing server→client [inputRequests].
+  Task? requireTaskInput(String taskId, Map<String, dynamic> inputRequests) =>
+      _transition(
+          taskId,
+          (t) => t.copyWith(
+              status: TaskStatus.inputRequired, inputRequests: inputRequests));
+
+  Future<void> _handleTaskGet(String sessionId, JsonRpcMessage request) async {
+    if (!_tasksEnabled) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
+          'Tasks extension not supported');
+      return;
+    }
+    final taskId = request.params?['taskId'] as String?;
+    final t = taskId == null ? null : _tasks[taskId];
+    if (t == null) {
+      // Missing task → -32602 on 2026-07-28 (InvalidParams), else internal.
+      final negotiated = _sessions[sessionId]?.negotiatedProtocolVersion;
+      final code = (negotiated != null && McpProtocol.isStateless(negotiated))
+          ? _resourceNotFoundStateless
+          : ErrorCode.invalidParams;
+      _sendErrorResponse(
+          sessionId, request.id, code, 'Task not found: $taskId');
+      return;
+    }
+    // GetTaskResult = Result & DetailedTask, resultType "complete".
+    _sendResponse(sessionId, request.id, {
+      ...t.toDetailedJson(),
+      McpResultType.key: McpResultType.complete,
+    });
+  }
+
+  Future<void> _handleTaskUpdate(
+      String sessionId, JsonRpcMessage request) async {
+    if (!_tasksEnabled) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
+          'Tasks extension not supported');
+      return;
+    }
+    final taskId = request.params?['taskId'] as String?;
+    final inputResponses = request.params?['inputResponses'];
+    final t = taskId == null ? null : _tasks[taskId];
+    if (t == null) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
+          'Task not found: $taskId');
+      return;
+    }
+    // Deliver the input responses; the task returns to `working`. Application
+    // logic consumes the responses and drives the task onward.
+    _onTaskInput?.call(t.taskId, inputResponses);
+    _transition(t.taskId,
+        (task) => task.copyWith(status: TaskStatus.working, inputRequests: {}));
+    // UpdateTaskResult = empty Result, resultType "complete".
+    _sendResponse(sessionId, request.id,
+        {McpResultType.key: McpResultType.complete});
+  }
+
+  Future<void> _handleTaskCancel(
+      String sessionId, JsonRpcMessage request) async {
+    if (!_tasksEnabled) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
+          'Tasks extension not supported');
+      return;
+    }
+    final taskId = request.params?['taskId'] as String?;
+    final t = taskId == null ? null : _tasks[taskId];
+    if (t == null) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.invalidParams,
+          'Task not found: $taskId');
+      return;
+    }
+    // Cooperative + eventually consistent: mark cancelled unless already
+    // terminal. Application logic SHOULD stop associated work.
+    if (!t.status.isTerminal) {
+      _transition(
+          t.taskId, (task) => task.copyWith(status: TaskStatus.cancelled));
+    }
+    _onTaskCancel?.call(t.taskId);
+    // CancelTaskResult = empty Result, resultType "complete".
+    _sendResponse(sessionId, request.id,
+        {McpResultType.key: McpResultType.complete});
+  }
+
+  /// Optional application hook invoked when a client delivers input responses
+  /// to an `input_required` task via `tasks/update`.
+  void Function(String taskId, dynamic inputResponses)? _onTaskInput;
+
+  /// Optional application hook invoked when a client cancels a task.
+  void Function(String taskId)? _onTaskCancel;
+
+  /// Register hooks for task input delivery / cancellation (application logic
+  /// that resumes or stops the task's work).
+  void onTaskInput(void Function(String taskId, dynamic inputResponses) fn) =>
+      _onTaskInput = fn;
+  void onTaskCancel(void Function(String taskId) fn) => _onTaskCancel = fn;
 
   /// Handle initialize request
   Future<void> _handleInitialize(String sessionId, JsonRpcMessage request) async {
@@ -1252,17 +1550,73 @@ class Server implements ServerInterface {
       }
     }
 
-    // Respond with server info and capabilities
+    // Respond with server info and capabilities. Both the handshake
+    // `initialize` result and the stateless `server/discover` result build
+    // their `serverInfo` + `capabilities` from the shared `describe()`
+    // assembly, so the two surfaces never drift.
+    final described = describe();
     final response = {
       'protocolVersion': negotiatedVersion,
-      'serverInfo': {
-        'name': name,
-        'version': version
-      },
-      'capabilities': capabilities.toJson(),
+      'serverInfo': described['serverInfo'],
+      'capabilities': described['capabilities'],
     };
 
     _sendResponse(sessionId, request.id, response);
+  }
+
+  /// Shared server-description assembly reused by the handshake `initialize`
+  /// result and the stateless `server/discover` result (2026-07-28), so the
+  /// two surfaces advertise the SAME `serverInfo` + `capabilities` object.
+  ///
+  /// Returns `serverInfo` (`Implementation`: name+version, plus the optional
+  /// 2025-11-25 `description`) and `capabilities` (`ServerCapabilities`).
+  /// `instructions` is intentionally NOT included here — it is a
+  /// `DiscoverResult`-only field surfaced by [_handleDiscover].
+  Map<String, dynamic> describe() {
+    return <String, dynamic>{
+      'serverInfo': <String, dynamic>{
+        'name': name,
+        'version': version,
+        // Spec 2025-11-25: optional Implementation.description.
+        if (description != null) 'description': description,
+      },
+      'capabilities': capabilities.toJson(),
+    };
+  }
+
+  /// Handle the 2026-07-28 `server/discover` request. Servers MUST implement
+  /// it: it advertises the supported protocol versions, capabilities, and
+  /// optional natural-language instructions on demand (there is no handshake
+  /// on the stateless path). Reuses [describe] so the capability object is
+  /// identical to the `initialize` result.
+  ///
+  /// `supportedVersions` includes 2026-07-28 only for a request that arrived
+  /// on the stateless branch (`session.isStateless`) — i.e. only when the
+  /// transport has `enableStateless: true`. A legacy session that calls
+  /// `server/discover` sees the handshake-negotiable list only.
+  Future<void> _handleDiscover(String sessionId, JsonRpcMessage request) async {
+    final described = describe();
+    final session = _sessions[sessionId];
+    final stateless = session?.isStateless ?? false;
+    final versions = <String>[
+      if (stateless) McpProtocol.v2026_07_28,
+      ...supportedProtocolVersions,
+    ];
+    final result = <String, dynamic>{
+      'supportedVersions': versions,
+      'capabilities': described['capabilities'],
+      // DiscoverResult extends CacheableResult; advertise a conservative
+      // private, immediately-revalidate cache hint (additive, spec-shaped).
+      'ttlMs': 0,
+      'cacheScope': 'private',
+      if (instructions != null) 'instructions': instructions,
+      // Result `_meta` carries serverInfo per ResultMetaObject (2026-07-28).
+      '_meta': McpRequestMeta.buildResult(
+        serverInfo: Map<String, dynamic>.from(
+            described['serverInfo'] as Map<String, dynamic>),
+      ),
+    };
+    _sendResponse(sessionId, request.id, result);
   }
 
   /// Handle tools/list request
@@ -1276,9 +1630,28 @@ class Server implements ServerInterface {
     }
 
     try {
+      // SEP-1613 (2025-11-25): annotate tool schemas with the default JSON
+      // Schema 2020-12 dialect. Version-gated so ≤2025-06-18 peers keep the
+      // prior free-form output; schemas that already declare `$schema` are
+      // left untouched.
+      final negotiated = _sessions[sessionId]?.negotiatedProtocolVersion;
+      final annotateDialect = negotiated != null &&
+          McpProtocol.defaultsJsonSchemaDialect(negotiated);
+
       final toolsList = _tools.values.map((tool) {
         _logger.debug('Processing tool: ${tool.name}');
-        return tool.toJson();
+        final json = tool.toJson();
+        if (annotateDialect) {
+          if (json['inputSchema'] is Map) {
+            json['inputSchema'] = McpProtocol.withDefaultSchemaDialect(
+                Map<String, dynamic>.from(json['inputSchema'] as Map));
+          }
+          if (json['outputSchema'] is Map) {
+            json['outputSchema'] = McpProtocol.withDefaultSchemaDialect(
+                Map<String, dynamic>.from(json['outputSchema'] as Map));
+          }
+        }
+        return json;
       }).toList();
 
       _logger.debug('Sending tools list: $toolsList');
@@ -1296,6 +1669,32 @@ class Server implements ServerInterface {
     }
   }
 
+  /// 2026-07-28 MRTR (SEP-2577): on the stateless path, if the re-issued
+  /// request carried `InputResponseRequestParams` (`inputResponses` /
+  /// `requestState`), copy them into a fresh [arguments] map under the reserved
+  /// reverse-DNS keys ([McpMrtr]) so a tool/prompt/resource handler can resume
+  /// without a signature change. Returns [arguments] unchanged on the legacy
+  /// path or a first-round call. Never mutates the input map.
+  Map<String, dynamic> _withMrtrArgs(
+      String sessionId, JsonRpcMessage request, Object? arguments) {
+    final base = arguments is Map
+        ? Map<String, dynamic>.from(arguments)
+        : <String, dynamic>{};
+    final session = _sessions[sessionId];
+    if (session?.isStateless != true) return base;
+    final params = request.params;
+    if (params == null) return base;
+    final inputResponses = params['inputResponses'];
+    final requestState = params['requestState'];
+    if (inputResponses is Map) {
+      base[McpMrtr.argInputResponses] = Map<String, dynamic>.from(inputResponses);
+    }
+    if (requestState is String) {
+      base[McpMrtr.argRequestState] = requestState;
+    }
+    return base;
+  }
+
   /// Handle tools/call request
   Future<void> _handleToolCall(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.hasTools) {
@@ -1310,7 +1709,8 @@ class Server implements ServerInterface {
     }
 
     final handler = _toolHandlers[toolName]!;
-    final arguments = request.params?['arguments'] ?? {};
+    final arguments =
+        _withMrtrArgs(sessionId, request, request.params?['arguments'] ?? {});
 
     // Register operation
     final operationId = registerToolCall(toolName!, sessionId, request.id);
@@ -1327,13 +1727,30 @@ class Server implements ServerInterface {
       }
     } catch (e) {
       _pendingOperations.remove(operationId);
-      _sendErrorResponse(
-        sessionId,
-        request.id,
-        ErrorCode.internalError,
-        'Tool execution error: $e',
-        {'tool': toolName},
-      );
+      // SEP-1303 (2025-11-25): a tool that ran and threw is a *tool
+      // execution error*, not a protocol error — return it as an
+      // `isError` CallToolResult so the model can self-correct. Gated by
+      // the negotiated version: peers on ≤2025-06-18 keep the prior
+      // JSON-RPC protocol-error behavior (no breaking change).
+      final negotiated = _sessions[sessionId]?.negotiatedProtocolVersion;
+      if (negotiated != null && McpProtocol.toolErrorsAsResult(negotiated)) {
+        _sendResponse(
+          sessionId,
+          request.id,
+          CallToolResult(
+            content: [TextContent(text: 'Tool execution error: $e')],
+            isError: true,
+          ).toJson(),
+        );
+      } else {
+        _sendErrorResponse(
+          sessionId,
+          request.id,
+          ErrorCode.internalError,
+          'Tool execution error: $e',
+          {'tool': toolName},
+        );
+      }
     }
   }
 
@@ -1389,7 +1806,16 @@ class Server implements ServerInterface {
     }
 
     if (handler == null) {
-      _sendErrorResponse(sessionId, request.id, ErrorCode.resourceNotFound, 'Resource not found: $uri');
+      // B6 (2026-07-28): resource-not-found emits JSON-RPC `-32602`
+      // (INVALID_PARAMS) ONLY when the negotiated version is 2026-07-28 (the
+      // stateless path); ≤2025-11-25 peers keep the prior code. The
+      // prompt-not-found code is deliberately NOT touched.
+      final negotiated = _sessions[sessionId]?.negotiatedProtocolVersion;
+      final code = (negotiated != null && McpProtocol.isStateless(negotiated))
+          ? _resourceNotFoundStateless
+          : ErrorCode.resourceNotFound;
+      _sendErrorResponse(
+          sessionId, request.id, code, 'Resource not found: $uri');
       return;
     }
 
@@ -1540,7 +1966,8 @@ class Server implements ServerInterface {
     }
 
     final handler = _promptHandlers[promptName]!;
-    final arguments = request.params?['arguments'] ?? {};
+    final arguments =
+        _withMrtrArgs(sessionId, request, request.params?['arguments'] ?? {});
 
     // Register operation for potential cancellation
     final operationId = Uuid().v4();
@@ -1663,7 +2090,10 @@ class Server implements ServerInterface {
   /// [params] follows the spec `CreateMessageRequest.params` shape:
   /// `messages`, `maxTokens` (required), plus optional `modelPreferences`,
   /// `systemPrompt`, `includeContext`, `temperature`, `stopSequences`,
-  /// `metadata`.
+  /// `metadata`. Spec 2025-11-25 (SEP-1577) adds optional `tools` and
+  /// `toolChoice` for sampling tool calling; build them with
+  /// [CreateMessageRequest] (whose `toJson()` emits them) and pass the
+  /// resulting map here — they are carried through unchanged to the client.
   ///
   /// Returns the spec `CreateMessageResult` map (`role`, `content`,
   /// `model`, optional `stopReason`).
@@ -1792,10 +2222,25 @@ class Server implements ServerInterface {
       return;
     }
 
+    // 2026-07-28 (SEP-2577): the draft `Result` carries `resultType` on EVERY
+    // stateless result. Stamp `"complete"` when the handler did not already set
+    // a discriminator (an `InputRequiredResult` sets `"input_required"` itself).
+    // Legacy (≤2025-11-25) results are left untouched — the field is absent, and
+    // an older client MUST treat absence as `"complete"`.
+    var outResult = result;
+    if (session.isStateless &&
+        outResult is Map &&
+        !outResult.containsKey(McpResultType.key)) {
+      outResult = <String, dynamic>{
+        ...Map<String, dynamic>.from(outResult),
+        McpResultType.key: McpResultType.complete,
+      };
+    }
+
     final response = {
       'jsonrpc': '2.0',
       'id': id,
-      'result': result,
+      'result': outResult,
     };
     session.transport.send(response);
   }
@@ -1872,6 +2317,20 @@ class Server implements ServerInterface {
     if (session == null) {
       throw StateError('Unknown sessionId for outbound request: $sessionId');
     }
+    // B1d (2026-07-28, SEP-2577): on the stateless path there is NO live
+    // server→client channel to push on — server-initiated requests happen ONLY
+    // while processing a client request, via the Multi-Round-Trip mechanism (the
+    // handler returns an `InputRequiredResult`; the client fulfills and
+    // re-issues). Push is inverted OFF for a stateless session; the legacy
+    // handshake/SSE path keeps push unchanged.
+    if (session.isStateless) {
+      throw McpError(
+        'Server-push `$method` is unavailable on the 2026-07-28 stateless path; '
+        'return an InputRequiredResult (Multi-Round-Trip) from the tool/prompt/'
+        'resource handler instead.',
+        code: ErrorCode.methodNotFound,
+      );
+    }
     final id = 'srv-${++_outboundRequestSeq}';
     final completer = Completer<dynamic>();
     _pendingOutboundRequests[id] = completer;
@@ -1929,6 +2388,97 @@ class Server implements ServerInterface {
     for (final session in _sessions.values) {
       session.transport.send(notification);
     }
+
+    // 2026-07-28 (SEP-2577): also fan out list-changed notifications to any
+    // `subscriptions/listen` stream whose filter opted into this type.
+    _fanOutToSubscriptions(method, params);
+  }
+
+  /// 2026-07-28 (SEP-2577): deliver a notification to every open
+  /// `subscriptions/listen` stream whose [SubscriptionFilter] opted into
+  /// [method] (and, for `notifications/resources/updated`, [uri]). Each delivery
+  /// is stamped with `_meta."io.modelcontextprotocol/subscriptionId"` so the
+  /// client can correlate it — and the transport routes it to the right SSE
+  /// stream by that id. The server MUST NOT send a notification type the client
+  /// did not request (guaranteed by `filter.allows`).
+  void _fanOutToSubscriptions(String method, Map<String, dynamic> params,
+      {String? uri}) {
+    if (_statelessSubscriptions.isEmpty) return;
+    for (final sub in _statelessSubscriptions.values) {
+      if (!sub.filter.allows(method, uri: uri)) continue;
+      final stamped =
+          McpRequestMeta.withSubscriptionId(params, sub.subscriptionId);
+      sub.transport.send(<String, dynamic>{
+        'jsonrpc': '2.0',
+        'method': method,
+        'params': stamped,
+      });
+    }
+  }
+
+  /// Handle a 2026-07-28 `subscriptions/listen` request (SEP-2577). Stateless
+  /// path only. Registers the opt-in [SubscriptionFilter] (intersected with the
+  /// server's advertised capabilities) and sends the mandated first message —
+  /// `notifications/subscriptions/acknowledged` carrying the honored subset and
+  /// the subscriptionId. NO response is returned now; the terminal
+  /// `SubscriptionsListenResult` is sent only on cancellation/teardown.
+  Future<void> _handleSubscriptionsListen(
+      String sessionId, JsonRpcMessage request) async {
+    final session = _sessions[sessionId];
+    if (session == null || !session.isStateless) {
+      _sendErrorResponse(sessionId, request.id, ErrorCode.methodNotFound,
+          '`subscriptions/listen` is available only on the 2026-07-28 stateless path');
+      return;
+    }
+    final notifications = request.params?['notifications'];
+    final requested = notifications is Map
+        ? SubscriptionFilter.fromJson(Map<String, dynamic>.from(notifications))
+        : const SubscriptionFilter();
+    final honored = requested.honoredBy(
+      hasTools: capabilities.hasTools,
+      hasPrompts: capabilities.hasPrompts,
+      hasResources: capabilities.hasResources,
+    );
+
+    final subId = request.id;
+    _statelessSubscriptions[subId.toString()] = _StatelessSubscription(
+      subscriptionId: subId as Object,
+      filter: honored,
+      transport: session.transport,
+    );
+
+    // First message MUST be the acknowledged notification (subscriptionId meta).
+    session.transport.send(<String, dynamic>{
+      'jsonrpc': '2.0',
+      'method': 'notifications/subscriptions/acknowledged',
+      'params': McpRequestMeta.withSubscriptionId(
+        <String, dynamic>{'notifications': honored.toJson()},
+        subId,
+      ),
+    });
+  }
+
+  /// Tear down a 2026-07-28 subscription stream (SEP-2577): deliver the terminal
+  /// `SubscriptionsListenResult` (a response with id == subscriptionId, its
+  /// `_meta.subscriptionId`, resultType `complete`) and drop the registration.
+  void _closeSubscription(String key) {
+    final sub = _statelessSubscriptions.remove(key);
+    if (sub == null) return;
+    sub.transport.send(<String, dynamic>{
+      'jsonrpc': '2.0',
+      'id': sub.subscriptionId,
+      'result': <String, dynamic>{
+        McpResultType.key: McpResultType.complete,
+        '_meta': <String, dynamic>{
+          McpRequestMeta.keySubscriptionId: sub.subscriptionId,
+          McpRequestMeta.keyServerInfo: <String, dynamic>{
+            'name': name,
+            'version': version,
+            if (description != null) 'description': description,
+          },
+        },
+      },
+    });
   }
 
   /// Get all registered tools
@@ -2514,4 +3064,21 @@ extension OAuthServerMethods on Server {
     });
   }
 
+}
+
+/// A live 2026-07-28 `subscriptions/listen` stream (SEP-2577). Held outside the
+/// protocol-session store because the subscription outlives the transient
+/// per-request session that opened it. Carries the honored [SubscriptionFilter]
+/// and the [transport] used to deliver stamped notifications + the terminal
+/// `SubscriptionsListenResult`.
+class _StatelessSubscription {
+  final Object subscriptionId;
+  final SubscriptionFilter filter;
+  final ServerTransport transport;
+
+  _StatelessSubscription({
+    required this.subscriptionId,
+    required this.filter,
+    required this.transport,
+  });
 }

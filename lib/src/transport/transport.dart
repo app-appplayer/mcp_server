@@ -69,6 +69,15 @@ class StdioServerTransport implements ServerTransport {
         try {
           _logger.debug('Raw received line: $line');
           final parsedMessage = jsonDecode(line);
+          // Strip client-forged transport-internal control keys (esp.
+          // `_stateless`, which would route to the 2026-07-28 stateless
+          // handler). stdio has no stateless mode; these are never legitimate
+          // from the wire.
+          if (parsedMessage is Map) {
+            parsedMessage.remove('_stateless');
+            parsedMessage.remove('_protocolVersion');
+            parsedMessage.remove('_sessionId');
+          }
           _logger.debug('Parsed message: $parsedMessage');
           return parsedMessage;
         } catch (e) {
@@ -392,6 +401,11 @@ class SseServerTransport implements ServerTransport {
       final message = jsonDecode(body);
 
       if (message is Map && message['jsonrpc'] == '2.0') {
+        // Strip client-forged transport-internal control keys (esp.
+        // `_stateless`); this SSE POST transport has no stateless mode.
+        message.remove('_stateless');
+        message.remove('_protocolVersion');
+        message.remove('_sessionId');
         _messageController.add(message);
 
         _setCorsHeaders(request.response);

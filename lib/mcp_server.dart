@@ -11,6 +11,9 @@ export 'src/models/models.dart';
 export 'src/server/server.dart';
 export 'src/transport/transport.dart';
 export 'src/protocol/protocol.dart';
+export 'src/protocol/request_meta.dart';
+export 'src/protocol/multi_round_trip.dart';
+export 'src/protocol/tasks.dart';
 export 'src/protocol/capabilities.dart';
 export 'src/annotations/tool_annotations.dart';
 export 'src/auth/auth_middleware.dart';
@@ -25,6 +28,10 @@ class McpServerConfig {
 
   /// The version of the server application
   final String version;
+
+  /// Optional human-readable description of the server
+  /// (spec 2025-11-25 `Implementation.description`).
+  final String? description;
 
   /// The capabilities supported by the server
   final ServerCapabilities capabilities;
@@ -44,6 +51,7 @@ class McpServerConfig {
   const McpServerConfig({
     required this.name,
     required this.version,
+    this.description,
     this.capabilities = const ServerCapabilities(),
     this.enableDebugLogging = false,
     this.maxConnections = 100,
@@ -55,6 +63,7 @@ class McpServerConfig {
   McpServerConfig copyWith({
     String? name,
     String? version,
+    String? description,
     ServerCapabilities? capabilities,
     bool? enableDebugLogging,
     int? maxConnections,
@@ -64,6 +73,7 @@ class McpServerConfig {
     return McpServerConfig(
       name: name ?? this.name,
       version: version ?? this.version,
+      description: description ?? this.description,
       capabilities: capabilities ?? this.capabilities,
       enableDebugLogging: enableDebugLogging ?? this.enableDebugLogging,
       maxConnections: maxConnections ?? this.maxConnections,
@@ -78,6 +88,7 @@ class McpServerConfig {
       other is McpServerConfig &&
       name == other.name &&
       version == other.version &&
+      description == other.description &&
       capabilities == other.capabilities &&
       enableDebugLogging == other.enableDebugLogging &&
       maxConnections == other.maxConnections &&
@@ -88,6 +99,7 @@ class McpServerConfig {
   int get hashCode => Object.hash(
     name,
     version,
+    description,
     capabilities,
     enableDebugLogging,
     maxConnections,
@@ -99,6 +111,7 @@ class McpServerConfig {
   String toString() => 'McpServerConfig('
       'name: $name, '
       'version: $version, '
+      'description: $description, '
       'capabilities: $capabilities, '
       'enableDebugLogging: $enableDebugLogging, '
       'maxConnections: $maxConnections, '
@@ -236,6 +249,7 @@ class McpServer {
     return Server(
       name: config.name,
       version: config.version,
+      description: config.description,
       capabilities: config.capabilities,
     );
   }

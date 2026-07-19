@@ -13,7 +13,27 @@ class McpProtocol {
   static const String v2025_11_25 = "2025-11-25";
   static const String latest = v2025_11_25;
 
-  /// All supported versions in order of preference (newest first)
+  /// Protocol version 2026-07-28 — BREAKING: stateless core (removes the
+  /// `initialize`/`initialized` handshake and `Mcp-Session-Id`; client
+  /// info/caps ride `_meta` on every request; `server/discover` fetches
+  /// caps on demand), Extensions framework, Tasks extension, auth
+  /// hardening, deprecations. Adopted as an additive, version-gated
+  /// parallel path — the handshake path stays for ≤2025-11-25 peers.
+  /// Deliberately NOT in [supportedVersions] until the stateless request
+  /// path lands, so handshake negotiation does not advertise it yet.
+  /// See `docs/STATELESS-COEXISTENCE-DESIGN.md`.
+  static const String v2026_07_28 = "2026-07-28";
+
+  /// Whether the [version] uses the stateless core (no handshake/session):
+  /// client info/caps in `_meta` per request, `server/discover` for caps,
+  /// `MCP-Protocol-Version` the sole version signal. Introduced 2026-07-28.
+  static bool isStateless(String version) => version == v2026_07_28;
+
+  /// All supported versions in order of preference (newest first).
+  ///
+  /// `v2026_07_28` is intentionally NOT listed yet (declared but its
+  /// stateless request path is unimplemented) — the server must not
+  /// advertise it in handshake negotiation until that lands.
   static const List<String> supportedVersions = [
     v2025_11_25,
     v2025_06_18,
@@ -21,32 +41,76 @@ class McpProtocol {
     v2024_11_05,
   ];
 
+  /// Date-ordered comparison of two revision strings (`YYYY-MM-DD`): true when
+  /// [version] is the same date as, or newer than, [floor].
+  ///
+  /// Used so a feature *introduced at* [floor] stays enabled for every LATER
+  /// revision (MCP is cumulative — new revisions coexist with and extend older
+  /// ones, they do not revert them). Writing these gates as `== <exact>` would
+  /// silently turn the feature OFF for the next revision (e.g. 2026-07-28),
+  /// forward-regressing SEP-1303 / SEP-1613 / elicitation / structured output.
+  static bool _isAtLeast(String version, String floor) {
+    final v = DateTime.tryParse(version);
+    final f = DateTime.tryParse(floor);
+    if (v == null || f == null) return false;
+    return !v.isBefore(f);
+  }
+
   /// Whether the negotiated [version] supports JSON-RPC batching.
-  /// Removed in 2025-06-18 (PR #416).
+  /// A bounded legacy set — batching was *removed* in 2025-06-18 (PR #416),
+  /// so this is intentionally not an "at least" gate.
   static bool supportsBatching(String version) =>
       version == v2024_11_05 || version == v2025_03_26;
 
   /// Whether the negotiated [version] knows the `elicitation/create`
-  /// server → client request (introduced in 2025-06-18).
+  /// server → client request (introduced in 2025-06-18, carried forward).
   static bool supportsElicitation(String version) =>
-      version == v2025_06_18 || version == v2025_11_25;
+      _isAtLeast(version, v2025_06_18);
 
   /// Whether the negotiated [version] understands the `MCP-Protocol-Version`
   /// HTTP header (mandatory after negotiation from 2025-06-18 onwards).
   static bool requiresProtocolHeader(String version) =>
-      version == v2025_06_18 || version == v2025_11_25;
+      _isAtLeast(version, v2025_06_18);
+
+  /// Whether tool execution errors are returned as an `isError`
+  /// [CallToolResult] (so the model can self-correct) rather than a
+  /// JSON-RPC protocol error. Clarified in 2025-11-25 (SEP-1303) and carried
+  /// forward. Older negotiated versions keep the prior protocol-error behavior.
+  static bool toolErrorsAsResult(String version) =>
+      _isAtLeast(version, v2025_11_25);
 
   /// Whether the negotiated [version] understands `Tool.outputSchema`,
   /// `CallToolResult.structuredContent`, and `resource_link` content
-  /// (introduced in 2025-06-18).
+  /// (introduced in 2025-06-18, carried forward).
   static bool supportsStructuredToolOutput(String version) =>
-      version == v2025_06_18 || version == v2025_11_25;
+      _isAtLeast(version, v2025_06_18);
 
   /// Whether the negotiated [version] understands `Tool.icons`,
   /// sampling `tools` / `toolChoice`, and URL-mode elicitation
-  /// (introduced in 2025-11-25).
+  /// (introduced in 2025-11-25, carried forward).
   static bool supportsIconsAndSamplingTools(String version) =>
-      version == v2025_11_25;
+      _isAtLeast(version, v2025_11_25);
+
+  /// Canonical URI of the JSON Schema 2020-12 dialect — the default dialect
+  /// for tool `inputSchema` / `outputSchema` as of 2025-11-25 (SEP-1613).
+  static const String jsonSchemaDialect2020_12 =
+      'https://json-schema.org/draft/2020-12/schema';
+
+  /// Whether tool schemas emitted to the negotiated [version] should carry
+  /// an explicit `$schema: <2020-12>` default annotation (SEP-1613).
+  /// Applied for 2025-11-25 and later peers; older peers keep prior output.
+  static bool defaultsJsonSchemaDialect(String version) =>
+      _isAtLeast(version, v2025_11_25);
+
+  /// Returns a copy of [schema] annotated with the default JSON Schema
+  /// 2020-12 dialect (`$schema`) when it is an object-type schema that does
+  /// not already declare a `$schema`. Free-form schemas that already carry
+  /// a `$schema`, or non-object schema fragments, are returned unchanged.
+  static Map<String, dynamic> withDefaultSchemaDialect(
+      Map<String, dynamic> schema) {
+    if (schema.containsKey(r'$schema')) return schema;
+    return {r'$schema': jsonSchemaDialect2020_12, ...schema};
+  }
   
   // Method names (aliases for compatibility)
   static const String methodInitialize = 'initialize';

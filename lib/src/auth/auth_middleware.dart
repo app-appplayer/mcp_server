@@ -234,18 +234,38 @@ class AuthMiddleware {
     return await validator.validateToken(token, requiredScopes: scopes);
   }
   
-  /// Send authentication challenge response
-  void sendAuthChallenge(HttpRequest request, {String? error, String? errorDescription}) {
+  /// Send authentication challenge response.
+  ///
+  /// MCP 2025-11-25 (RFC 9728 / SEP-985, incremental scope SEP-835): when the
+  /// server publishes OAuth Protected Resource metadata, the challenge SHOULD
+  /// point the client at the well-known document via
+  /// `resource_metadata="<url>"` and MAY advertise a required `scope=` for
+  /// step-up. Both are additive — omitting them reproduces the prior bare
+  /// `Bearer error=…` challenge.
+  void sendAuthChallenge(
+    HttpRequest request, {
+    String? error,
+    String? errorDescription,
+    String? resourceMetadataUrl,
+    String? scope,
+  }) {
     request.response.statusCode = 401;
-    
-    String challenge = 'Bearer';
+
+    final params = <String>[];
+    if (resourceMetadataUrl != null) {
+      params.add('resource_metadata="$resourceMetadataUrl"');
+    }
     if (error != null) {
-      challenge += ' error="$error"';
+      params.add('error="$error"');
       if (errorDescription != null) {
-        challenge += ', error_description="$errorDescription"';
+        params.add('error_description="$errorDescription"');
       }
     }
-    
+    if (scope != null && scope.isNotEmpty) {
+      params.add('scope="$scope"');
+    }
+    final challenge = params.isEmpty ? 'Bearer' : 'Bearer ${params.join(', ')}';
+
     request.response.headers.set('WWW-Authenticate', challenge);
     request.response.headers.set('Content-Type', 'application/json');
     

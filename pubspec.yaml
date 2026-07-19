@@ -1,6 +1,6 @@
 name: mcp_server
 description: Dart implementation of Model Context Protocol (MCP) server. Supports protocol revisions 2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 with per-version capability gating, OAuth 2.1 (RFC 9728), and stdio / SSE / Streamable HTTP transports.
-version: 2.0.0
+version: 2.1.0
 homepage: https://app-appplayer.github.io/makemind
 repository: https://github.com/app-appplayer/mcp_server
 issue_tracker: https://github.com/app-appplayer/mcp_server/issues
@@ -22,3 +22,7 @@ dev_dependencies:
   mockito: ^5.4.4
   build_runner: ^2.4.12
   json_serializable: ^6.8.0
+  # Used only by the server<->client auth interop test
+  # (test/prm_client_interop_test.dart). Resolved locally via
+  # pubspec_overrides.yaml so the test exercises the in-tree client.
+  mcp_client: ^2.1.0

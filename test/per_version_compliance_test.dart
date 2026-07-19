@@ -92,6 +92,24 @@ void main() {
           McpProtocol.supportsIconsAndSamplingTools(McpProtocol.v2025_11_25),
           isTrue);
     });
+
+    // Regression (interop audit 2026-07-19, "Finding 6"): the "introduced and
+    // carried forward" gates were written `== <exact revision>`, so they would
+    // silently turn OFF for the next revision (2026-07-28) — forward-regressing
+    // SEP-1303 / SEP-1613 / elicitation / structured output. They must stay ON
+    // for a later revision (MCP is cumulative). `supportsBatching` is the one
+    // deliberately-bounded legacy gate and must stay OFF for 2026-07-28.
+    test('introduced-and-carried-forward gates stay ON for 2026-07-28', () {
+      const next = McpProtocol.v2026_07_28;
+      expect(McpProtocol.toolErrorsAsResult(next), isTrue);
+      expect(McpProtocol.defaultsJsonSchemaDialect(next), isTrue);
+      expect(McpProtocol.supportsElicitation(next), isTrue);
+      expect(McpProtocol.requiresProtocolHeader(next), isTrue);
+      expect(McpProtocol.supportsStructuredToolOutput(next), isTrue);
+      expect(McpProtocol.supportsIconsAndSamplingTools(next), isTrue);
+      // Batching was removed in 2025-06-18 — must NOT come back for a newer rev.
+      expect(McpProtocol.supportsBatching(next), isFalse);
+    });
   });
 
   group('Version negotiation', () {

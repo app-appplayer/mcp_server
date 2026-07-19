@@ -1,3 +1,63 @@
+## [2.1.0] - 2026-07-19 - 2025-11-25 conformance + 2026-07-28 stateless core (dormant)
+
+Additive, backward-compatible (all new fields optional/named; `==`/`hashCode`
+unchanged; behavior changes are negotiated-version gated — older peers keep prior
+behavior). No public API removed.
+
+### Added — 2025-11-25 conformance
+- DNS-rebinding protection: `StreamableHttpServerConfig.allowedOrigins` → HTTP 403
+  on a disallowed `Origin` (opt-in; default null = prior behavior).
+- Tool-execution errors returned as an `isError` `CallToolResult` (SEP-1303),
+  gated to 2025-11-25+ (older peers keep the JSON-RPC protocol error).
+- SSE event replay / resumability implemented (`Last-Event-ID`, SEP-1699).
+- Sampling `tools`/`toolChoice` (`SamplingTool`, `ToolChoice`); typed elicitation
+  (`EnumSchema`, single/multi-select, URL-mode, defaults); `Server.description`
+  emitted in `serverInfo`; JSON Schema 2020-12 dialect helper; opt-in stderr log
+  sink (`attachStderrLogSink`).
+- OAuth: 401 emits `WWW-Authenticate: Bearer resource_metadata=…` (RFC 9728) +
+  optional `challengeScope` (SEP-835) when PRM is configured.
+
+### Fixed
+- JSON-RPC batching now works over Streamable HTTP for sessions that negotiated
+  2024-11-05 / 2025-03-26. The transport previously hard-cast every request body
+  to an object, so a batch array was rejected with a `-32700` parse error before
+  the (already-implemented, version-gated) batch dispatch ran. Array bodies are
+  now routed through a version-gated batch handler that dispatches each entry and
+  returns a single JSON array of responses; 2025-06-18+ sessions correctly reject
+  a batch with `-32600` (removed in 2025-06-18), not a parse error.
+- **Security — dormancy hardening.** A client could activate the dormant
+  2026-07-28 stateless path by forging the transport-internal `_stateless`
+  control key in its request body (over HTTP / stdio / SSE), flipping the server
+  into stateless mode and leaking `2026-07-28` in `server/discover` even with
+  `enableStateless` off. The stateless router now honors `_stateless` only when
+  the connected transport genuinely has stateless enabled, and every ingestion
+  boundary strips client-forged reserved keys (`_stateless` / `_protocolVersion`
+  / `_sessionId`).
+- Version-gated feature predicates that are "introduced and carried forward"
+  (`toolErrorsAsResult`, `defaultsJsonSchemaDialect`, `supportsElicitation`,
+  `requiresProtocolHeader`, `supportsStructuredToolOutput`,
+  `supportsIconsAndSamplingTools`) now use an "at least this revision" date
+  comparison instead of `== <exact revision>`, so they stay enabled for later
+  revisions (e.g. 2026-07-28) instead of silently regressing. `supportsBatching`
+  stays a bounded legacy set (removed in 2025-06-18). No change for the four
+  currently-negotiable revisions.
+
+### Deprecated
+- `CallToolResult.isStreaming` — non-standard hint, honored nowhere. Standard
+  streaming = enable via a tool (`tools/call`) + deliver via a reactive resource
+  (`subscriptions/listen`, or legacy `resources/subscribe`). Retained +
+  serialized for backward compatibility; removed in 3.0.
+
+### Added — 2026-07-28 stateless core (BUILD-DORMANT, opt-in via `StreamableHttpServerConfig.enableStateless`, default false)
+- `_meta` reverse-DNS keys (`McpRequestMeta`), `server/discover` + shared
+  `Server.describe()`, stateless request routing (no session), Multi-Round-Trip
+  (`InputRequiredResult`), `subscriptions/listen`, Extensions framework
+  (`ServerCapabilities.extensions`), Tasks extension (task store + `tasks/get` /
+  `tasks/update` / `tasks/cancel`, gated on the tasks extension), resource-not-found
+  `-32602` on the stateless path.
+- Inert until enabled — the full handshake/session path is unchanged; zero behavior
+  change for existing consumers.
+
 ## [2.0.0] - 2026-04-30 - MCP spec compliance + 2025-11-25 alignment
 
 Big-Bang spec normalization. Supports protocol revisions 2024-11-05, 2025-03-26, 2025-06-18, and 2025-11-25 with per-version capability gating.

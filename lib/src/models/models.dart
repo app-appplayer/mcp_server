@@ -336,12 +336,24 @@ class Tool {
 class CallToolResult {
   final List<Content> content;
   final Map<String, dynamic>? structuredContent;
+
+  /// NON-STANDARD (makemind) legacy hint. Not part of the MCP `CallToolResult`
+  /// spec and honored nowhere (the transport closes a tool-call stream on the
+  /// final result regardless of this flag). The standard pattern is: **enable**
+  /// streaming with a tool (`tools/call`) and **deliver** the stream via a
+  /// reactive resource (`subscriptions/listen` on 2026-07-28, `resources/
+  /// subscribe` on ≤2025-11-25). Retained + still serialized for backward
+  /// compatibility; slated for removal in the next major (3.0).
+  @Deprecated(
+      'Non-standard hint, honored nowhere. Enable streaming via a tool and '
+      'deliver via a reactive resource (subscriptions/listen). Removed in 3.0.')
   final bool isStreaming;
   final bool? isError;
 
   const CallToolResult({
     required this.content,
     this.structuredContent,
+    @Deprecated('See CallToolResult.isStreaming — removed in 3.0.')
     this.isStreaming = false,
     this.isError,
   });
@@ -350,6 +362,7 @@ class CallToolResult {
     return {
       'content': content.map((c) => c.toJson()).toList(),
       if (structuredContent != null) 'structuredContent': structuredContent,
+      // ignore: deprecated_member_use_from_same_package
       'isStreaming': isStreaming,
       if (isError != null) 'isError': isError,
     };
@@ -587,6 +600,15 @@ class Message {
       'content': content.toJson(),
     };
   }
+
+  factory Message.fromJson(Map<String, dynamic> json) {
+    return Message(
+      role: json['role'] as String,
+      content: Content.fromJson(
+        Map<String, dynamic>.from(json['content'] as Map),
+      ),
+    );
+  }
 }
 
 /// Get prompt result
@@ -623,6 +645,13 @@ class ModelHint {
       result['weight'] = weight!;
     }
     return result;
+  }
+
+  factory ModelHint.fromJson(Map<String, dynamic> json) {
+    return ModelHint(
+      name: json['name'] as String,
+      weight: json['weight'] as String?,
+    );
   }
 }
 
@@ -661,6 +690,99 @@ class ModelPreferences {
 
     return result;
   }
+
+  factory ModelPreferences.fromJson(Map<String, dynamic> json) {
+    return ModelPreferences(
+      hints: (json['hints'] as List?)
+          ?.map((h) => ModelHint.fromJson(Map<String, dynamic>.from(h as Map)))
+          .toList(),
+      intelligencePriority: (json['intelligencePriority'] as num?)?.toDouble(),
+      speedPriority: (json['speedPriority'] as num?)?.toDouble(),
+      costPriority: (json['costPriority'] as num?)?.toDouble(),
+    );
+  }
+}
+
+/// A tool definition offered to the client's LLM during sampling
+/// (spec 2025-11-25 sampling tool calling, SEP-1577).
+///
+/// Mirrors the shape of a top-level [Tool] but is transmitted inside a
+/// `sampling/createMessage` request so the model may call it. Round-trips
+/// via [toJson] / [fromJson].
+class SamplingTool {
+  final String name;
+  final String? description;
+
+  /// JSON Schema (2020-12 dialect) describing the tool's arguments.
+  final Map<String, dynamic> inputSchema;
+
+  const SamplingTool({
+    required this.name,
+    this.description,
+    required this.inputSchema,
+  });
+
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'name': name,
+      'inputSchema': inputSchema,
+    };
+    if (description != null) json['description'] = description;
+    return json;
+  }
+
+  factory SamplingTool.fromJson(Map<String, dynamic> json) {
+    return SamplingTool(
+      name: json['name'] as String,
+      description: json['description'] as String?,
+      inputSchema: Map<String, dynamic>.from(json['inputSchema'] as Map),
+    );
+  }
+}
+
+/// Controls how / whether the model selects tools during sampling
+/// (spec 2025-11-25 sampling tool calling, SEP-1577).
+///
+/// [type] is one of `auto` (model decides), `any` (must call some tool),
+/// `none` (no tool call), or `tool` (must call the named tool — [name]
+/// required in that case). Round-trips via [toJson] / [fromJson].
+class ToolChoice {
+  final String type;
+
+  /// The specific tool name, required when [type] == `tool`.
+  final String? name;
+
+  const ToolChoice({
+    required this.type,
+    this.name,
+  });
+
+  /// Convenience constructors mirroring the spec's enumerated modes.
+  const ToolChoice.auto()
+      : type = 'auto',
+        name = null;
+  const ToolChoice.any()
+      : type = 'any',
+        name = null;
+  const ToolChoice.none()
+      : type = 'none',
+        name = null;
+  const ToolChoice.tool(String toolName)
+      : type = 'tool',
+        name = toolName;
+
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'type': type};
+    if (name != null) json['name'] = name;
+    return json;
+  }
+
+  factory ToolChoice.fromJson(Map<String, dynamic> json) {
+    return ToolChoice(
+      type: json['type'] as String,
+      name: json['name'] as String?,
+    );
+  }
 }
 
 /// Create message request for sampling
@@ -674,6 +796,14 @@ class CreateMessageRequest {
   final List<String>? stopSequences;
   final Map<String, dynamic>? metadata;
 
+  /// Spec 2025-11-25 (SEP-1577): tools the client's LLM may call while
+  /// generating this completion. Only understood by 2025-11-25 peers.
+  final List<SamplingTool>? tools;
+
+  /// Spec 2025-11-25 (SEP-1577): controls tool selection. Only understood
+  /// by 2025-11-25 peers.
+  final ToolChoice? toolChoice;
+
   CreateMessageRequest({
     required this.messages,
     this.modelPreferences,
@@ -683,6 +813,8 @@ class CreateMessageRequest {
     this.temperature,
     this.stopSequences,
     this.metadata,
+    this.tools,
+    this.toolChoice,
   });
 
   Map<String, dynamic> toJson() {
@@ -718,7 +850,45 @@ class CreateMessageRequest {
       result['metadata'] = metadata;
     }
 
+    if (tools != null) {
+      result['tools'] = tools!.map((t) => t.toJson()).toList();
+    }
+
+    if (toolChoice != null) {
+      result['toolChoice'] = toolChoice!.toJson();
+    }
+
     return result;
+  }
+
+  factory CreateMessageRequest.fromJson(Map<String, dynamic> json) {
+    return CreateMessageRequest(
+      messages: (json['messages'] as List)
+          .map((m) => Message.fromJson(Map<String, dynamic>.from(m as Map)))
+          .toList(),
+      modelPreferences: json['modelPreferences'] != null
+          ? ModelPreferences.fromJson(
+              Map<String, dynamic>.from(json['modelPreferences'] as Map))
+          : null,
+      systemPrompt: json['systemPrompt'] as String?,
+      includeContext: json['includeContext'] as String?,
+      maxTokens: json['maxTokens'] as int?,
+      temperature: (json['temperature'] as num?)?.toDouble(),
+      stopSequences: (json['stopSequences'] as List?)
+          ?.map((e) => e.toString())
+          .toList(),
+      metadata: json['metadata'] != null
+          ? Map<String, dynamic>.from(json['metadata'] as Map)
+          : null,
+      tools: (json['tools'] as List?)
+          ?.map((t) =>
+              SamplingTool.fromJson(Map<String, dynamic>.from(t as Map)))
+          .toList(),
+      toolChoice: json['toolChoice'] != null
+          ? ToolChoice.fromJson(
+              Map<String, dynamic>.from(json['toolChoice'] as Map))
+          : null,
+    );
   }
 }
 
@@ -782,6 +952,326 @@ class CreateMessageResult {
       stopReason: json['stopReason'],
       role: json['role'],
       content: content,
+    );
+  }
+}
+
+/// Base type for elicitation primitive schema definitions.
+///
+/// The spec restricts an elicitation `requestedSchema` to a flat object of
+/// primitive properties. This typed layer (SEP-1034 defaults, SEP-1330
+/// enums) is additive over the raw-map path accepted by
+/// `Server.requestClientElicitation` — every subtype simply produces the
+/// spec-shaped JSON map. Round-trips via [toJson] / [ElicitationSchema.fromJson].
+abstract class ElicitationSchema {
+  const ElicitationSchema();
+
+  Map<String, dynamic> toJson();
+
+  /// Parse a primitive schema definition map back into a typed instance.
+  /// Recognizes string / number / integer / boolean / single-select enum /
+  /// multi-select enum (`type: array` whose `items` is an enum). Falls back
+  /// to [RawElicitationSchema] for anything unrecognized.
+  factory ElicitationSchema.fromJson(Map<String, dynamic> json) {
+    final type = json['type'];
+    if (type == 'string') {
+      if (json['enum'] is List) {
+        return EnumSchema.fromJson(json);
+      }
+      return StringSchema.fromJson(json);
+    }
+    if (type == 'number' || type == 'integer') {
+      return NumberSchema.fromJson(json);
+    }
+    if (type == 'boolean') {
+      return BooleanSchema.fromJson(json);
+    }
+    if (type == 'array') {
+      final items = json['items'];
+      if (items is Map && items['enum'] is List) {
+        return EnumSchema.fromJson(json);
+      }
+    }
+    return RawElicitationSchema(Map<String, dynamic>.from(json));
+  }
+}
+
+/// Escape hatch preserving an unrecognized primitive schema map verbatim.
+class RawElicitationSchema extends ElicitationSchema {
+  final Map<String, dynamic> raw;
+  const RawElicitationSchema(this.raw);
+
+  @override
+  Map<String, dynamic> toJson() => raw;
+}
+
+/// String primitive schema (SEP-1034 `default`).
+class StringSchema extends ElicitationSchema {
+  final String? title;
+  final String? description;
+  final int? minLength;
+  final int? maxLength;
+  final String? format;
+  final String? defaultValue;
+
+  const StringSchema({
+    this.title,
+    this.description,
+    this.minLength,
+    this.maxLength,
+    this.format,
+    this.defaultValue,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'type': 'string'};
+    if (title != null) json['title'] = title;
+    if (description != null) json['description'] = description;
+    if (minLength != null) json['minLength'] = minLength;
+    if (maxLength != null) json['maxLength'] = maxLength;
+    if (format != null) json['format'] = format;
+    if (defaultValue != null) json['default'] = defaultValue;
+    return json;
+  }
+
+  factory StringSchema.fromJson(Map<String, dynamic> json) {
+    return StringSchema(
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      minLength: json['minLength'] as int?,
+      maxLength: json['maxLength'] as int?,
+      format: json['format'] as String?,
+      defaultValue: json['default'] as String?,
+    );
+  }
+}
+
+/// Number / integer primitive schema (SEP-1034 `default`).
+class NumberSchema extends ElicitationSchema {
+  /// When true the schema emits `type: "integer"`, otherwise `type: "number"`.
+  final bool integer;
+  final String? title;
+  final String? description;
+  final num? minimum;
+  final num? maximum;
+  final num? defaultValue;
+
+  const NumberSchema({
+    this.integer = false,
+    this.title,
+    this.description,
+    this.minimum,
+    this.maximum,
+    this.defaultValue,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'type': integer ? 'integer' : 'number'};
+    if (title != null) json['title'] = title;
+    if (description != null) json['description'] = description;
+    if (minimum != null) json['minimum'] = minimum;
+    if (maximum != null) json['maximum'] = maximum;
+    if (defaultValue != null) json['default'] = defaultValue;
+    return json;
+  }
+
+  factory NumberSchema.fromJson(Map<String, dynamic> json) {
+    return NumberSchema(
+      integer: json['type'] == 'integer',
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      minimum: json['minimum'] as num?,
+      maximum: json['maximum'] as num?,
+      defaultValue: json['default'] as num?,
+    );
+  }
+}
+
+/// Boolean primitive schema (SEP-1034 `default`).
+class BooleanSchema extends ElicitationSchema {
+  final String? title;
+  final String? description;
+  final bool? defaultValue;
+
+  const BooleanSchema({
+    this.title,
+    this.description,
+    this.defaultValue,
+  });
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'type': 'boolean'};
+    if (title != null) json['title'] = title;
+    if (description != null) json['description'] = description;
+    if (defaultValue != null) json['default'] = defaultValue;
+    return json;
+  }
+
+  factory BooleanSchema.fromJson(Map<String, dynamic> json) {
+    return BooleanSchema(
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      defaultValue: json['default'] as bool?,
+    );
+  }
+}
+
+/// Enum primitive schema (SEP-1330 single- and multi-select, SEP-1034
+/// `default`). [enumNames] provides human-readable titles parallel to
+/// [values]; null means untitled (clients display the raw value).
+///
+/// When [multiSelect] is true the schema is emitted as a `type: "array"`
+/// whose `items` is the enum (the user may pick several values); otherwise
+/// a `type: "string"` single-select enum.
+class EnumSchema extends ElicitationSchema {
+  final List<String> values;
+  final List<String>? enumNames;
+  final bool multiSelect;
+  final String? title;
+  final String? description;
+
+  /// For single-select this is a `String`; for multi-select a
+  /// `List<String>`. Emitted as `default` (SEP-1034).
+  final Object? defaultValue;
+
+  const EnumSchema({
+    required this.values,
+    this.enumNames,
+    this.multiSelect = false,
+    this.title,
+    this.description,
+    this.defaultValue,
+  });
+
+  Map<String, dynamic> _enumBody() {
+    final body = <String, dynamic>{
+      'type': 'string',
+      'enum': values,
+    };
+    if (enumNames != null) body['enumNames'] = enumNames;
+    return body;
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    if (multiSelect) {
+      final json = <String, dynamic>{
+        'type': 'array',
+        'items': _enumBody(),
+      };
+      if (title != null) json['title'] = title;
+      if (description != null) json['description'] = description;
+      if (defaultValue != null) json['default'] = defaultValue;
+      return json;
+    }
+    final json = _enumBody();
+    if (title != null) json['title'] = title;
+    if (description != null) json['description'] = description;
+    if (defaultValue != null) json['default'] = defaultValue;
+    return json;
+  }
+
+  factory EnumSchema.fromJson(Map<String, dynamic> json) {
+    if (json['type'] == 'array') {
+      final items = Map<String, dynamic>.from(json['items'] as Map);
+      return EnumSchema(
+        values: (items['enum'] as List).map((e) => e.toString()).toList(),
+        enumNames: (items['enumNames'] as List?)
+            ?.map((e) => e.toString())
+            .toList(),
+        multiSelect: true,
+        title: json['title'] as String?,
+        description: json['description'] as String?,
+        defaultValue: json['default'],
+      );
+    }
+    return EnumSchema(
+      values: (json['enum'] as List).map((e) => e.toString()).toList(),
+      enumNames:
+          (json['enumNames'] as List?)?.map((e) => e.toString()).toList(),
+      multiSelect: false,
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      defaultValue: json['default'],
+    );
+  }
+}
+
+/// A typed builder for the standard (form-mode) elicitation request params.
+///
+/// Produces the spec `ElicitRequest.params` shape:
+/// `{ message, requestedSchema: { type: "object", properties, required } }`.
+/// Pass [toJson] to `Server.requestClientElicitation`. Additive over the
+/// raw-map path.
+class ElicitationRequest {
+  final String message;
+  final Map<String, ElicitationSchema> properties;
+  final List<String> required;
+
+  const ElicitationRequest({
+    required this.message,
+    required this.properties,
+    this.required = const [],
+  });
+
+  Map<String, dynamic> toJson() {
+    final schema = <String, dynamic>{
+      'type': 'object',
+      'properties': {
+        for (final entry in properties.entries)
+          entry.key: entry.value.toJson(),
+      },
+    };
+    if (required.isNotEmpty) schema['required'] = required;
+    return {
+      'message': message,
+      'requestedSchema': schema,
+    };
+  }
+
+  factory ElicitationRequest.fromJson(Map<String, dynamic> json) {
+    final schema = Map<String, dynamic>.from(json['requestedSchema'] as Map);
+    final props = (schema['properties'] as Map?) ?? const {};
+    return ElicitationRequest(
+      message: json['message'] as String,
+      properties: {
+        for (final entry in props.entries)
+          entry.key.toString(): ElicitationSchema.fromJson(
+              Map<String, dynamic>.from(entry.value as Map)),
+      },
+      required:
+          (schema['required'] as List?)?.map((e) => e.toString()).toList() ??
+              const [],
+    );
+  }
+}
+
+/// URL-mode elicitation request (SEP-1036): the server asks the client to
+/// open [url] so the user can complete an out-of-band interaction (e.g. an
+/// OAuth consent). Produces `{ mode: "url", message, url }`. Additive over
+/// the raw-map path.
+class UrlElicitationRequest {
+  final String message;
+  final String url;
+
+  const UrlElicitationRequest({
+    required this.message,
+    required this.url,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'mode': 'url',
+        'message': message,
+        'url': url,
+      };
+
+  factory UrlElicitationRequest.fromJson(Map<String, dynamic> json) {
+    return UrlElicitationRequest(
+      message: json['message'] as String,
+      url: json['url'] as String,
     );
   }
 }
@@ -936,6 +1426,12 @@ class ClientSession {
   Map<String, dynamic>? capabilities;
   dynamic transport; // ServerTransport
   List<Map<String, dynamic>> roots = [];
+
+  /// True for a transient 2026-07-28 stateless-core request session: no
+  /// handshake, client info/caps sourced per-request from `_meta`, torn down
+  /// after the response. `false` for every legacy handshake session. Set only
+  /// on the stateless transport branch (`enableStateless: true`).
+  bool isStateless = false;
   
   // OAuth 2.1 authentication support (2025-03-26)
   String? authToken;
