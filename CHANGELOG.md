@@ -1,3 +1,32 @@
+## [2.1.1] - 2026-07-28 - Session-scoped in-flight request tracking
+
+Bug fix. No public API change; the JSON-RPC wire contract is unchanged (request
+ids are never rewritten — a client always gets its own id back).
+
+### Fixed
+- `StreamableHttpServerTransport` tracked in-flight requests by the bare
+  JSON-RPC id. Since JSON-RPC 2.0 guarantees id uniqueness only *within* a
+  session, and clients commonly count from 1 per connection, two concurrent
+  sessions using the same id collided: the second registration overwrote the
+  first, whose `HttpResponse` was then unreachable and never written or closed
+  (that caller received 0 bytes until its own timeout), and a response could be
+  delivered to the wrong session. Every in-flight map — pending requests, sync
+  and async JSON completers, stateless completers, batch completers, SSE
+  streams, message routers and stateless subscription streams — is now keyed by
+  `(session, id)`.
+- `Server` now stamps `_targetSessionId` on responses and on stateless
+  subscription messages, as it already did for notifications and
+  server-initiated requests; the response path was the one place the session
+  axis was dropped. A response that arrives without it is refused rather than
+  matched on the bare id.
+- Transport-internal routing metadata (`_targetSessionId`) is stripped before
+  encoding on every transport. The stdio and SSE transports previously emitted
+  it on the wire for notifications.
+- A stateless `subscriptions/listen` is registered per session, so two clients
+  choosing the same listen id no longer evict one another. A cancellation that
+  cannot be attributed to a single subscription is refused rather than closing
+  an arbitrary client's stream.
+
 ## [2.1.0] - 2026-07-19 - 2025-11-25 conformance + 2026-07-28 stateless core (dormant)
 
 Additive, backward-compatible (all new fields optional/named; `==`/`hashCode`

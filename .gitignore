@@ -14,3 +14,6 @@ pubspec.lock
 # Compiled executables
 example/mcp_server_example
 
+# Local-only dependency overrides (never published; pub excludes it from the
+# package payload). Kept out of git so a release commit leaves a clean tree.
+pubspec_overrides.yaml

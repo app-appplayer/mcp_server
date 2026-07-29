@@ -196,24 +196,38 @@ class StreamableHttpServerTransport implements ServerTransport {
   final Set<String> _activeSessions = {};
   final Set<String> _terminatedSessions = {};
   
+  // In-flight request tracking.
+  //
+  // Every map below is keyed by [_inflightKey] — `'<sessionId>:<requestId>'` —
+  // NOT by the bare JSON-RPC id. JSON-RPC 2.0 only guarantees id uniqueness
+  // *within* a session; clients routinely count from 1 per connection, so two
+  // concurrent sessions collide on the bare id. With a bare key the second
+  // registration silently overwrites the first, orphaning its HttpResponse
+  // (the caller then hangs with 0 bytes until its own timeout) and delivering
+  // the response to the wrong session.
+  //
+  // The session half of the key comes from `_sessionId` on the way in (every
+  // inbound handler has it in scope) and from `_targetSessionId` on the way
+  // out (stamped by `Server._sendResponse` / `_sendErrorResponse`).
+
   // Request tracking for JSON responses
-  final Map<dynamic, _PendingRequest> _pendingRequests = {};
-  
+  final Map<String, _PendingRequest> _pendingRequests = {};
+
   // Completers for synchronous JSON mode
-  final Map<dynamic, Completer<Map<String, dynamic>>> _pendingCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _pendingCompleters = {};
 
   // Completers for one-shot 2026-07-28 stateless requests. Kept separate from
   // `_pendingCompleters` so the stateless response path is independent of the
   // JSON/SSE response-mode config — a stateless request always resolves here
   // regardless of `isJsonResponseEnabled`. Dormant unless `enableStateless`.
-  final Map<dynamic, Completer<Map<String, dynamic>>> _statelessCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _statelessCompleters = {};
 
   // Completers for JSON-RPC batch entries (2024-11-05 / 2025-03-26; batching
   // was removed in 2025-06-18). Kept separate from `_pendingCompleters` so a
   // batched request resolves here regardless of `isJsonResponseEnabled` — the
   // whole batch is answered as one JSON array (spec-compliant). Empty unless a
   // batch is in flight.
-  final Map<dynamic, Completer<Map<String, dynamic>>> _batchCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _batchCompleters = {};
 
   // Resolves a session's negotiated protocol revision, injected by
   // `Server.connect`. Lets the transport version-gate JSON-RPC batching (a
@@ -232,18 +246,18 @@ class StreamableHttpServerTransport implements ServerTransport {
   // subscriptionId). Notifications carrying `_meta.subscriptionId` and the
   // terminal `SubscriptionsListenResult` (response id == subscriptionId) are
   // routed here by `send()`. Dormant unless `enableStateless`.
-  final Map<dynamic, StreamController<String>> _statelessSubscriptionStreams =
+  final Map<String, StreamController<String>> _statelessSubscriptionStreams =
       {};
 
   // Response store for asynchronous JSON mode
   final Map<String, Map<String, dynamic>> _responseStore = {};
   final Map<String, DateTime> _responseTimestamps = {};
   
-  // SSE streams per request ID for streaming responses
-  final Map<dynamic, SseStreamInfo> _sseStreams = {};
-  
+  // SSE streams per in-flight request for streaming responses
+  final Map<String, SseStreamInfo> _sseStreams = {};
+
   // Message router for proper request/response matching
-  final Map<dynamic, StreamController<dynamic>> _messageRouters = {};
+  final Map<String, StreamController<dynamic>> _messageRouters = {};
 
   // GET streams per session for server-initiated messages (standalone SSE stream)
   final Map<String, SseStreamInfo> _getStreams = {};
@@ -296,6 +310,15 @@ class StreamableHttpServerTransport implements ServerTransport {
   static String _generateSessionId() {
     return const Uuid().v4();
   }
+
+  /// Composite key for every in-flight request map.
+  ///
+  /// A JSON-RPC id is unique only within its own session, so the session id is
+  /// the other half of the identity. The wire id itself is never rewritten —
+  /// the client always gets its own id back, and `notifications/cancelled`
+  /// (which references the client's original id) keeps matching.
+  static String _inflightKey(String sessionId, dynamic requestId) =>
+      '$sessionId:$requestId';
 
   /// Extract or generate session ID from request
   String _getOrCreateSessionId(HttpRequest request) {
@@ -816,7 +839,8 @@ class StreamableHttpServerTransport implements ServerTransport {
     }
 
     final completer = Completer<Map<String, dynamic>>();
-    _statelessCompleters[id] = completer;
+    final inflightKey = _inflightKey(ephemeralId, id);
+    _statelessCompleters[inflightKey] = completer;
     if (!_messageController.isClosed) {
       _messageController.add(wrappedMessage);
     }
@@ -837,7 +861,7 @@ class StreamableHttpServerTransport implements ServerTransport {
       request.response.add(utf8.encode(json.encode(response)));
       await request.response.close();
     } on TimeoutException {
-      _statelessCompleters.remove(id);
+      _statelessCompleters.remove(inflightKey);
       _sendJsonRpcErrorStatus(request.response, id, -32603, 'Request timeout',
           HttpStatus.gatewayTimeout);
     }
@@ -866,6 +890,10 @@ class StreamableHttpServerTransport implements ServerTransport {
   Future<void> _handleStatelessSubscribe(
       HttpRequest request, Map<String, dynamic> wrappedMessage) async {
     final subscriptionId = wrappedMessage['id'];
+    // Same collision axis as every other in-flight map: the subscriptionId is
+    // the listen request's JSON-RPC id, unique only within its own session.
+    final streamKey =
+        _inflightKey(wrappedMessage['_sessionId'] as String, subscriptionId);
 
     request.response.statusCode = HttpStatus.ok;
     request.response.headers.set('Content-Type', contentTypeSse);
@@ -880,7 +908,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     request.response.bufferOutput = false;
 
     final controller = StreamController<String>();
-    _statelessSubscriptionStreams[subscriptionId] = controller;
+    _statelessSubscriptionStreams[streamKey] = controller;
 
     controller.stream.listen(
       (data) {
@@ -893,14 +921,14 @@ class StreamableHttpServerTransport implements ServerTransport {
         try {
           await request.response.close();
         } catch (_) {}
-        _statelessSubscriptionStreams.remove(subscriptionId);
+        _statelessSubscriptionStreams.remove(streamKey);
       },
-      onError: (_) => _statelessSubscriptionStreams.remove(subscriptionId),
+      onError: (_) => _statelessSubscriptionStreams.remove(streamKey),
     );
 
     // Clean up if the client disconnects before graceful teardown.
     unawaited(request.response.done.whenComplete(() {
-      if (_statelessSubscriptionStreams.remove(subscriptionId) != null &&
+      if (_statelessSubscriptionStreams.remove(streamKey) != null &&
           !controller.isClosed) {
         controller.close();
       }
@@ -994,14 +1022,17 @@ class StreamableHttpServerTransport implements ServerTransport {
       return;
     }
 
-    final requestIds = <dynamic>[];
+    // Keys, not bare ids: a batch entry's id collides with a concurrent
+    // session's just like a single request's does.
+    final requestKeys = <String>[];
     for (final item in batch) {
       if (item is! Map<String, dynamic>) continue;
       _stripReservedKeys(item);
       final isRequest = item['method'] is String && item['id'] != null;
       if (isRequest) {
-        _batchCompleters[item['id']] = Completer<Map<String, dynamic>>();
-        requestIds.add(item['id']);
+        final key = _inflightKey(sessionId, item['id']);
+        _batchCompleters[key] = Completer<Map<String, dynamic>>();
+        requestKeys.add(key);
       }
       if (!_messageController.isClosed) {
         _messageController.add({...item, '_sessionId': sessionId});
@@ -1009,7 +1040,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     }
 
     // Notification-only batch: nothing to answer.
-    if (requestIds.isEmpty) {
+    if (requestKeys.isEmpty) {
       request.response.statusCode = HttpStatus.accepted;
       request.response.headers.set('Content-Type', contentTypeJson);
       request.response.headers.set('Content-Length', '0');
@@ -1020,8 +1051,8 @@ class StreamableHttpServerTransport implements ServerTransport {
 
     try {
       final responses = <Map<String, dynamic>>[];
-      for (final id in requestIds) {
-        responses.add(await _batchCompleters[id]!.future.timeout(
+      for (final key in requestKeys) {
+        responses.add(await _batchCompleters[key]!.future.timeout(
               config.requestTimeout,
               onTimeout: () => throw TimeoutException('Batch request timeout'),
             ));
@@ -1036,19 +1067,20 @@ class StreamableHttpServerTransport implements ServerTransport {
       _sendJsonRpcError(request.response, sessionId, null, -32603,
           'Internal error', 'Batch processing error: $e');
     } finally {
-      for (final id in requestIds) {
-        _batchCompleters.remove(id);
+      for (final key in requestKeys) {
+        _batchCompleters.remove(key);
       }
     }
   }
 
   Future<void> _handleSyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
+    final inflightKey = _inflightKey(sessionId, requestId);
 
     // Create completer for this request
     final completer = Completer<Map<String, dynamic>>();
-    _pendingCompleters[requestId] = completer;
-    _logger.debug('Created completer for request ID: $requestId (type: ${requestId.runtimeType})');
+    _pendingCompleters[inflightKey] = completer;
+    _logger.debug('Created completer for request $inflightKey (id type: ${requestId.runtimeType})');
 
     // Send to message controller
     if (!_messageController.isClosed) {
@@ -1089,17 +1121,18 @@ class StreamableHttpServerTransport implements ServerTransport {
       request.response.add(utf8.encode(json.encode(errorResponse)));
       await request.response.close();
     } finally {
-      _pendingCompleters.remove(requestId);
+      _pendingCompleters.remove(inflightKey);
     }
   }
-  
+
   /// Handle asynchronous JSON response mode with polling
   Future<void> _handleAsyncJsonResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
-    final responseKey = '$sessionId:$requestId';
+    // Same shape as the polling Location and `_responseStore` key.
+    final responseKey = _inflightKey(sessionId, requestId);
 
     // Store pending request with sessionId
-    _pendingRequests[requestId] = _PendingRequest(
+    _pendingRequests[responseKey] = _PendingRequest(
       request: request,
       timestamp: DateTime.now(),
       sessionId: sessionId,
@@ -1174,6 +1207,7 @@ class StreamableHttpServerTransport implements ServerTransport {
   /// Handle request with SSE response (StreamableHTTP default)
   Future<void> _handleSseResponse(HttpRequest request, Map<String, dynamic> jsonRpcRequest, String sessionId) async {
     final requestId = jsonRpcRequest['id'];
+    final inflightKey = _inflightKey(sessionId, requestId);
 
     // Set SSE headers
     request.response.headers.set('Content-Type', contentTypeSse);
@@ -1183,14 +1217,14 @@ class StreamableHttpServerTransport implements ServerTransport {
 
     // Create SSE stream for this request
     final sseController = StreamController<String>();
-    _sseStreams[requestId] = SseStreamInfo(
+    _sseStreams[inflightKey] = SseStreamInfo(
       controller: sseController,
       response: request.response,
     );
 
     // Create message router for this request
     final messageRouter = StreamController<dynamic>();
-    _messageRouters[requestId] = messageRouter;
+    _messageRouters[inflightKey] = messageRouter;
 
     // Start sending SSE events with proper UTF-8 encoding
     sseController.stream.listen(
@@ -1199,13 +1233,13 @@ class StreamableHttpServerTransport implements ServerTransport {
       },
       onDone: () async {
         await request.response.close();
-        _sseStreams.remove(requestId);
-        _messageRouters.remove(requestId)?.close();
+        _sseStreams.remove(inflightKey);
+        _messageRouters.remove(inflightKey)?.close();
       },
       onError: (error) {
         _logger.error('SSE stream error: $error');
-        _sseStreams.remove(requestId);
-        _messageRouters.remove(requestId)?.close();
+        _sseStreams.remove(inflightKey);
+        _messageRouters.remove(inflightKey)?.close();
       },
     );
 
@@ -1732,16 +1766,23 @@ class StreamableHttpServerTransport implements ServerTransport {
   ///    (stays open), or
   ///  - a response whose `id` names an open stream (the terminal
   ///    `SubscriptionsListenResult` → deliver, then close the stream).
+  ///
+  /// Both matches are keyed by (session, subscriptionId): the session half is
+  /// `_targetSessionId`, stamped by the server on every subscription message.
+  /// A message without it cannot name a subscription stream and falls through.
   bool _routeStatelessSubscription(Map message) {
+    final targetSessionId = message['_targetSessionId'];
+    if (targetSessionId is! String) return false;
     final isResponse =
         message.containsKey('id') && !message.containsKey('method');
     if (isResponse) {
-      final controller = _statelessSubscriptionStreams[message['id']];
+      final key = _inflightKey(targetSessionId, message['id']);
+      final controller = _statelessSubscriptionStreams[key];
       if (controller == null) return false;
       final clean = Map<String, dynamic>.from(message)..remove('_targetSessionId');
       _sendSseEvent(controller, clean);
       if (!controller.isClosed) controller.close();
-      _statelessSubscriptionStreams.remove(message['id']);
+      _statelessSubscriptionStreams.remove(key);
       return true;
     }
     // Notification: match on `params._meta.subscriptionId`.
@@ -1751,7 +1792,8 @@ class StreamableHttpServerTransport implements ServerTransport {
     final subId =
         meta is Map ? meta['io.modelcontextprotocol/subscriptionId'] : null;
     if (subId == null) return false;
-    final controller = _statelessSubscriptionStreams[subId];
+    final controller =
+        _statelessSubscriptionStreams[_inflightKey(targetSessionId, subId)];
     if (controller == null) return false;
     final clean = Map<String, dynamic>.from(message)..remove('_targetSessionId');
     _sendSseEvent(controller, clean);
@@ -1810,15 +1852,33 @@ class StreamableHttpServerTransport implements ServerTransport {
 
       if (isResponse) {
         final requestId = message['id'];
-        _logger.debug('Response ID: $requestId (type: ${requestId.runtimeType})');
+
+        // Session half of the in-flight key, stamped by `Server._sendResponse`
+        // / `_sendErrorResponse`. Without it a response cannot be attributed to
+        // a session, and matching on the bare id would be exactly the collision
+        // this key exists to prevent — so drop it rather than guess.
+        final targetSessionId = message['_targetSessionId'];
+        if (targetSessionId is! String) {
+          _logger.error(
+              'Dropping response id=$requestId: no _targetSessionId. A response '
+              'must be routed by (session, id); matching on the bare id would '
+              'cross sessions.');
+          return;
+        }
+        final inflightKey = _inflightKey(targetSessionId, requestId);
+        _logger.debug('Response $inflightKey (id type: ${requestId.runtimeType})');
+
+        // Internal routing metadata never reaches the wire.
+        final outbound = Map<String, dynamic>.from(message)
+          ..remove('_targetSessionId');
 
         // 2026-07-28 stateless: resolve the one-shot completer independent of
         // the JSON/SSE response-mode config. Checked first so a stateless
         // reply never falls into the session-scoped SSE/JSON routing below.
-        final statelessCompleter = _statelessCompleters.remove(requestId);
+        final statelessCompleter = _statelessCompleters.remove(inflightKey);
         if (statelessCompleter != null) {
           if (!statelessCompleter.isCompleted) {
-            statelessCompleter.complete(Map<String, dynamic>.from(message));
+            statelessCompleter.complete(outbound);
           }
           return;
         }
@@ -1826,68 +1886,64 @@ class StreamableHttpServerTransport implements ServerTransport {
         // JSON-RPC batch entry: resolve the batch completer independent of the
         // response-mode config (the batch is answered as one JSON array in
         // `_handleBatchRequest`). Checked before the mode-scoped routing below.
-        final batchCompleter = _batchCompleters[requestId];
+        final batchCompleter = _batchCompleters[inflightKey];
         if (batchCompleter != null) {
           if (!batchCompleter.isCompleted) {
-            batchCompleter.complete(Map<String, dynamic>.from(message));
+            batchCompleter.complete(outbound);
           }
           return;
         }
 
         // Generate event ID for resumability
         final eventId = (_eventIdCounter++).toString();
-        
+
         // Store event for resumability
         _eventStore[eventId] = EventMessage(
-          message: Map<String, dynamic>.from(message),
+          message: outbound,
           eventId: eventId,
         );
-        
+
         // Handle based on mode
         if (config.isJsonResponseEnabled) {
           if (config.jsonResponseMode == 'sync') {
             // Synchronous JSON mode: complete the pending completer
-            if (_pendingCompleters.containsKey(requestId)) {
+            final completer = _pendingCompleters.remove(inflightKey);
+            if (completer != null) {
               try {
-                _logger.debug('Completing completer for request ID: $requestId');
-                _pendingCompleters[requestId]!.complete(Map<String, dynamic>.from(message));
-                _pendingCompleters.remove(requestId);
-                _logger.debug('Successfully completed completer for request ID: $requestId');
+                completer.complete(outbound);
+                _logger.debug('Completed completer for request $inflightKey');
               } catch (e, stackTrace) {
-                _logger.error('Error completing completer for request ID $requestId: $e');
+                _logger.error('Error completing completer for $inflightKey: $e');
                 _logger.debug('Stack trace: $stackTrace');
               }
             } else {
-              _logger.warning('No pending completer for response ID: $requestId');
+              _logger.warning('No pending completer for response $inflightKey');
               _logger.debug('Available completers: ${_pendingCompleters.keys.toList()}');
             }
           } else {
-            // Asynchronous JSON mode: store response for polling
-            // Get sessionId from pending request
-            final pendingRequest = _pendingRequests[requestId];
-            if (pendingRequest != null) {
-              final responseKey = '${pendingRequest.sessionId}:$requestId';
-              _responseStore[responseKey] = Map<String, dynamic>.from(message);
-              _responseTimestamps[responseKey] = DateTime.now();
-              _pendingRequests.remove(requestId);
+            // Asynchronous JSON mode: store response for polling. The store key
+            // and the in-flight key are the same `<session>:<id>` shape.
+            if (_pendingRequests.remove(inflightKey) != null) {
+              _responseStore[inflightKey] = outbound;
+              _responseTimestamps[inflightKey] = DateTime.now();
             } else {
-              _logger.warning('No pending request found for async response ID: $requestId');
+              _logger.warning('No pending request for async response $inflightKey');
             }
           }
-        } else if (_sseStreams.containsKey(requestId)) {
+        } else if (_sseStreams.containsKey(inflightKey)) {
           // SSE response for specific request
-          final stream = _sseStreams[requestId]!;
-          _sendSseEvent(stream.controller, Map<String, dynamic>.from(message), eventId: eventId);
-          
+          final stream = _sseStreams[inflightKey]!;
+          _sendSseEvent(stream.controller, outbound, eventId: eventId);
+
           // If this is a response or error, close the stream
           if (message.containsKey('result') || message.containsKey('error')) {
             stream.controller.close();
-            _sseStreams.remove(requestId);
-            _messageRouters.remove(requestId)?.close();
+            _sseStreams.remove(inflightKey);
+            _messageRouters.remove(inflightKey)?.close();
           }
         } else {
           // Log when we can't find a pending request for a response
-          _logger.warning('No pending request found for response with ID: $requestId');
+          _logger.warning('No pending request found for response $inflightKey');
           _logger.debug('Current pending requests: ${_pendingRequests.keys.toList()}');
           _logger.debug('Current SSE streams: ${_sseStreams.keys.toList()}');
         }

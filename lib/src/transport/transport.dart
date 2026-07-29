@@ -9,6 +9,28 @@ export 'streamable_http_server_transport.dart' hide mcpSessionIdHeader, lastEven
 
 final Logger _logger = Logger('mcp_server.transport');
 
+/// Transport-internal routing keys the [Server] stamps on outbound messages.
+///
+/// `_targetSessionId` names the session a message belongs to — multi-session
+/// transports route on it, since a JSON-RPC id alone is unique only within a
+/// session. It is internal metadata and MUST NOT reach the wire, so every
+/// transport strips it immediately before encoding.
+const _internalRoutingKeys = <String>['_targetSessionId'];
+
+/// Strip transport-internal routing metadata from an outbound [message].
+///
+/// Returns [message] unchanged when it carries none, so the common path costs
+/// nothing.
+dynamic stripInternalRoutingKeys(dynamic message) {
+  if (message is! Map) return message;
+  if (!_internalRoutingKeys.any(message.containsKey)) return message;
+  final clean = Map<String, dynamic>.from(message);
+  for (final key in _internalRoutingKeys) {
+    clean.remove(key);
+  }
+  return clean;
+}
+
 /// Abstract base class for server transport implementations
 abstract class ServerTransport {
   /// Stream of incoming messages
@@ -156,7 +178,7 @@ class StdioServerTransport implements ServerTransport {
     }
 
     try {
-      final jsonMessage = jsonEncode(message);
+      final jsonMessage = jsonEncode(stripInternalRoutingKeys(message));
       _logger.debug('Encoding message: $message');
       _logger.debug('Encoded JSON: $jsonMessage');
 
@@ -435,7 +457,7 @@ class SseServerTransport implements ServerTransport {
 
   @override
   void send(dynamic message) {
-    final jsonString = jsonEncode(message);
+    final jsonString = jsonEncode(stripInternalRoutingKeys(message));
     final eventData = 'event: message\ndata: $jsonString\n\n';
 
     // Snapshot to avoid mutation during async dispatch.

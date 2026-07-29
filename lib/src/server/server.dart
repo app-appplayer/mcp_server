@@ -1152,8 +1152,26 @@ class Server implements ServerInterface {
           // `subscriptions/listen` id terminates that stream (and ONLY that
           // stream) — deliver the terminal `SubscriptionsListenResult` and drop
           // the subscription. Otherwise fall through to normal op-cancellation.
-          if (_statelessSubscriptions.containsKey(cancelRequestId)) {
-            _closeSubscription(cancelRequestId);
+          // A stateless `notifications/cancelled` arrives on its own ephemeral
+          // session — the listen session is already gone — so the cancel can
+          // only be resolved by subscriptionId, the sole handle the wire
+          // carries. Registration is still keyed by (session, subscriptionId)
+          // so two clients that pick the same listen id both stay alive; when
+          // that makes a cancel ambiguous we refuse rather than tear down a
+          // stream we cannot attribute (the client's disconnect still cleans
+          // it up).
+          final subKeys = _statelessSubscriptions.entries
+              .where((e) => e.value.subscriptionId.toString() == cancelRequestId)
+              .map((e) => e.key)
+              .toList();
+          if (subKeys.length == 1) {
+            _closeSubscription(subKeys.first);
+            break;
+          }
+          if (subKeys.length > 1) {
+            _logger.error(
+                'Ambiguous subscription cancel: subscriptionId $cancelRequestId '
+                'is open on ${subKeys.length} sessions. Refusing to close any.');
             break;
           }
           for (final op in _pendingOperations.values) {
@@ -2241,6 +2259,11 @@ class Server implements ServerInterface {
       'jsonrpc': '2.0',
       'id': id,
       'result': outResult,
+      // Target session for multi-session transports. JSON-RPC id uniqueness is
+      // only guaranteed *within* a session, so a transport tracking in-flight
+      // requests MUST key on (session, id); this is the session half of that
+      // key on the way out. Stripped before the message reaches the wire.
+      '_targetSessionId': sessionId,
     };
     session.transport.send(response);
   }
@@ -2266,6 +2289,8 @@ class Server implements ServerInterface {
         'code': code,
         'message': message,
       },
+      // See `_sendResponse`: session half of the transport's (session, id) key.
+      '_targetSessionId': sessionId,
     };
 
     if (data != null) {
@@ -2412,6 +2437,9 @@ class Server implements ServerInterface {
         'jsonrpc': '2.0',
         'method': method,
         'params': stamped,
+        // The transport routes this by (session, subscriptionId); the id half
+        // rides in `_meta.subscriptionId`, the session half here.
+        '_targetSessionId': sub.sessionId,
       });
     }
   }
@@ -2441,7 +2469,11 @@ class Server implements ServerInterface {
     );
 
     final subId = request.id;
-    _statelessSubscriptions[subId.toString()] = _StatelessSubscription(
+    // Keyed by (session, subscriptionId): the subscriptionId is the listen
+    // request's JSON-RPC id, which is only unique within its own session.
+    _statelessSubscriptions[_subscriptionKey(sessionId, subId)] =
+        _StatelessSubscription(
+      sessionId: sessionId,
       subscriptionId: subId as Object,
       filter: honored,
       transport: session.transport,
@@ -2455,8 +2487,15 @@ class Server implements ServerInterface {
         <String, dynamic>{'notifications': honored.toJson()},
         subId,
       ),
+      // Session half of the (session, subscriptionId) routing key.
+      '_targetSessionId': sessionId,
     });
   }
+
+  /// Composite key for [_statelessSubscriptions] / the transport's subscription
+  /// streams. A bare subscriptionId collides across sessions.
+  static String _subscriptionKey(String sessionId, dynamic subscriptionId) =>
+      '$sessionId:$subscriptionId';
 
   /// Tear down a 2026-07-28 subscription stream (SEP-2577): deliver the terminal
   /// `SubscriptionsListenResult` (a response with id == subscriptionId, its
@@ -2467,6 +2506,8 @@ class Server implements ServerInterface {
     sub.transport.send(<String, dynamic>{
       'jsonrpc': '2.0',
       'id': sub.subscriptionId,
+      // Session half of the transport's (session, id) key — see `_sendResponse`.
+      '_targetSessionId': sub.sessionId,
       'result': <String, dynamic>{
         McpResultType.key: McpResultType.complete,
         '_meta': <String, dynamic>{
@@ -3072,11 +3113,16 @@ extension OAuthServerMethods on Server {
 /// and the [transport] used to deliver stamped notifications + the terminal
 /// `SubscriptionsListenResult`.
 class _StatelessSubscription {
+  /// Owning session. The subscriptionId alone is not unique across sessions,
+  /// so every outbound message for this subscription carries this as
+  /// `_targetSessionId` for the transport to route on.
+  final String sessionId;
   final Object subscriptionId;
   final SubscriptionFilter filter;
   final ServerTransport transport;
 
   _StatelessSubscription({
+    required this.sessionId,
     required this.subscriptionId,
     required this.filter,
     required this.transport,
