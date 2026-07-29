@@ -525,15 +525,12 @@ class Server implements ServerInterface {
 
   /// Send progress notification for a tool operation
   void notifyProgress(String operationId, double progress, String message) {
-    // Find the session and request ID for this operation
     final operation = _pendingOperations[operationId];
-    if (operation?.requestId != null) {
-      sendProgressNotification(
-          operation!.sessionId,
-          operation.requestId!,
-          progress
-      );
-    }
+    final token = operation?.progressToken;
+    // No token means the client never asked for progress on this call, and a
+    // notification carrying anything else cannot be matched to it.
+    if (operation == null || token == null) return;
+    sendProgressNotification(operation.sessionId, '$token', progress);
   }
 
   /// Check if operation is cancelled
@@ -543,13 +540,15 @@ class Server implements ServerInterface {
   }
 
   /// Register a tool call and get an operation ID for progress/cancellation
-  String registerToolCall(String toolName, String sessionId, dynamic requestId) {
+  String registerToolCall(String toolName, String sessionId, dynamic requestId,
+      {Object? progressToken}) {
     final operationId = Uuid().v4();
     _pendingOperations[operationId] = PendingOperation(
         id: operationId,
         sessionId: sessionId,
         type: 'tool:$toolName',
-        requestId: requestId.toString()
+        requestId: requestId.toString(),
+        progressToken: progressToken,
     );
     return operationId;
   }
@@ -1673,7 +1672,8 @@ class Server implements ServerInterface {
       }).toList();
 
       _logger.debug('Sending tools list: $toolsList');
-      _sendResponse(sessionId, request.id, {'tools': toolsList});
+      _sendResponse(sessionId, request.id,
+        _withCacheHints(sessionId, {'tools': toolsList}));
     } catch (e, stackTrace) {
       _logger.error('Error in tools list: $e');
       _logger.debug('Stacktrace: $stackTrace');
@@ -1731,16 +1731,30 @@ class Server implements ServerInterface {
         _withMrtrArgs(sessionId, request, request.params?['arguments'] ?? {});
 
     // Register operation
-    final operationId = registerToolCall(toolName!, sessionId, request.id);
+    final requestMeta = (request.params?['_meta'] is Map)
+        ? request.params!['_meta'] as Map
+        : null;
+    final operationId = registerToolCall(
+      toolName!,
+      sessionId,
+      request.id,
+      progressToken: requestMeta?['progressToken'],
+    );
 
     try {
-      // Call the handler with just the arguments
-      final result = await handler(arguments);
+      // The handler signature carries no request context, so the operation is
+      // published on the zone. A progress-reporting tool needs it to address
+      // its notifications at the call that is actually in flight.
+      final result = await runZoned(
+        () => handler(arguments),
+        zoneValues: {#mcpOperationId: operationId},
+      );
 
       if (isOperationCancelled(operationId)) {
         _sendErrorResponse(sessionId, request.id, ErrorCode.operationCancelled, 'Operation cancelled by client');
       } else {
-        _sendResponse(sessionId, request.id, result.toJson());
+        _sendResponse(sessionId, request.id,
+            _withCacheHints(sessionId, result.toJson(), scope: 'private'));
         _pendingOperations.remove(operationId);
       }
     } catch (e) {
@@ -1787,7 +1801,8 @@ class Server implements ServerInterface {
     _logger.debug('📋 Found ${resourcesList.length} resources');
 
     _logger.debug('📤 Sending response for sessionId: $sessionId, requestId: ${request.id}');
-    _sendResponse(sessionId, request.id, {'resources': resourcesList});
+    _sendResponse(sessionId, request.id,
+        _withCacheHints(sessionId, {'resources': resourcesList}));
     _logger.debug('✅ Response sent successfully');
   }
 
@@ -1809,7 +1824,8 @@ class Server implements ServerInterface {
     if (!noCache) {
       final cached = getCachedResource(uri);
       if (cached != null) {
-        _sendResponse(sessionId, request.id, cached.content.toJson());
+        _sendResponse(sessionId, request.id,
+            _withCacheHints(sessionId, cached.content.toJson(), scope: 'private'));
         return;
       }
     }
@@ -1888,6 +1904,27 @@ class Server implements ServerInterface {
     }
   }
 
+  /// Adds the caching hints the 2026-07-28 revision requires on cacheable
+  /// results (`server/discover`, the list operations, `resources/read`).
+  ///
+  /// Only on the stateless branch: earlier revisions do not define these
+  /// fields, and a result should not carry keys its revision never declared.
+  /// The values are deliberately conservative — a server that does not know
+  /// how long its data stays valid should say "revalidate", not invent a TTL.
+  Map<String, dynamic> _withCacheHints(
+    String sessionId,
+    Map<String, dynamic> result, {
+    String scope = 'public',
+  }) {
+    final session = _sessions[sessionId];
+    if (!(session?.isStateless ?? false)) return result;
+    return {
+      ...result,
+      'ttlMs': 0,
+      'cacheScope': scope,
+    };
+  }
+
   /// Handle resources/templates/list request
   Future<void> _handleResourceTemplatesList(String sessionId, JsonRpcMessage request) async {
     if (!capabilities.hasResources) {
@@ -1895,18 +1932,40 @@ class Server implements ServerInterface {
       return;
     }
 
-    // Filter resources with URI templates
-    final resourceTemplates = _resources.values
-        .where((resource) => resource.uriTemplate != null)
-        .map((resource) => {
-      'uriTemplate': resource.uri,
-      'name': resource.name,
-      'description': resource.description,
-      'mimeType': resource.mimeType,
-    })
-        .toList();
+    // Templates registered through `addResourceTemplate` live in
+    // `_resourceTemplates`; resources may also carry a `uriTemplate` of their
+    // own. Both are templates to a client, so both are returned — reading only
+    // one store is what made registered templates unreachable.
+    final byTemplate = <String, Map<String, dynamic>>{};
 
-    _sendResponse(sessionId, request.id, {'resourceTemplates': resourceTemplates});
+    for (final template in _resourceTemplates.values) {
+      byTemplate[template.uriTemplate] = {
+        'uriTemplate': template.uriTemplate,
+        'name': template.name,
+        'description': template.description,
+        if (template.mimeType != null) 'mimeType': template.mimeType,
+      };
+    }
+
+    for (final resource in _resources.values) {
+      // A resource carries template metadata in `uriTemplate`; the template
+      // string itself is the resource's own uri.
+      if (resource.uriTemplate == null) continue;
+      byTemplate.putIfAbsent(
+        resource.uri,
+        () => {
+          'uriTemplate': resource.uri,
+          'name': resource.name,
+          'description': resource.description,
+          'mimeType': resource.mimeType,
+        },
+      );
+    }
+
+    final resourceTemplates = byTemplate.values.toList();
+
+    _sendResponse(sessionId, request.id,
+        _withCacheHints(sessionId, {'resourceTemplates': resourceTemplates}));
   }
 
   /// Handle resources/subscribe request
@@ -1931,7 +1990,7 @@ class Server implements ServerInterface {
     // Emit subscription event
     _resourceSubscribedController.add(uri);
 
-    _sendResponse(sessionId, request.id, {'success': true});
+    _sendResponse(sessionId, request.id, const {});
   }
 
   /// Handle resources/unsubscribe request
@@ -1956,7 +2015,7 @@ class Server implements ServerInterface {
     // Emit unsubscription event
     _resourceUnsubscribedController.add(uri);
 
-    _sendResponse(sessionId, request.id, {'success': true});
+    _sendResponse(sessionId, request.id, const {});
   }
 
   /// Handle prompts/list request
@@ -1967,7 +2026,8 @@ class Server implements ServerInterface {
     }
 
     final promptsList = _prompts.values.map((prompt) => prompt.toJson()).toList();
-    _sendResponse(sessionId, request.id, {'prompts': promptsList});
+    _sendResponse(sessionId, request.id,
+        _withCacheHints(sessionId, {'prompts': promptsList}));
   }
 
   /// Handle prompts/get request
@@ -2648,10 +2708,12 @@ class Server implements ServerInterface {
     
     // Wrap the handler to support progress
     _toolHandlers[name] = (arguments) async {
-      // Create an operation ID for progress tracking
-      final operationId = const Uuid().v4();
-      
+      // The operation the dispatcher registered for this call. Minting a new
+      // id here would address a call that does not exist, and the progress
+      // would go nowhere.
+      final operationId = Zone.current[#mcpOperationId] as String?;
       return await handler(arguments, onProgress: (progress, message) {
+        if (operationId == null) return;
         notifyProgress(operationId, progress, message);
       });
     };
@@ -3098,11 +3160,9 @@ extension OAuthServerMethods on Server {
 
   /// Handle ping request
   Future<void> _handlePing(String sessionId, JsonRpcMessage request) async {
-    // Simple ping/pong implementation for keepalive
-    _sendResponse(sessionId, request.id, {
-      'pong': true,
-      'timestamp': DateTime.now().toIso8601String(),
-    });
+    // `ping` answers with an empty result. Carrying extra keys is not a richer
+    // reply — a conformant peer validates the result shape and rejects it.
+    _sendResponse(sessionId, request.id, const {});
   }
 
 }

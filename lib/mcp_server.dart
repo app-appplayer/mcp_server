@@ -394,6 +394,10 @@ class McpServer {
     bool isJsonResponseEnabled = false,
     String? sessionId,
     String? authToken,
+    CorsConfig? corsConfig,
+    List<String>? allowedOrigins,
+    bool allowAnyOrigin = false,
+    bool enableStateless = false,
   }) async {
     try {
       final transport = StreamableHttpServerTransport(
@@ -404,6 +408,10 @@ class McpServer {
           fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
           isJsonResponseEnabled: isJsonResponseEnabled,
           authToken: authToken,
+          corsConfig: corsConfig ?? const CorsConfig(),
+          allowedOrigins: allowedOrigins,
+          allowAnyOrigin: allowAnyOrigin,
+          enableStateless: enableStateless,
         ),
       );
       // Start the server and wait for it to be ready
@@ -423,6 +431,10 @@ class McpServer {
     bool isJsonResponseEnabled = false,
     String? sessionId,
     String? authToken,
+    CorsConfig? corsConfig,
+    List<String>? allowedOrigins,
+    bool allowAnyOrigin = false,
+    bool enableStateless = false,
   }) {
     return Results.catching(() {
       final transport = StreamableHttpServerTransport(
@@ -433,6 +445,10 @@ class McpServer {
           fallbackPorts: fallbackPorts ?? [port + 1, port + 2, port + 3],
           isJsonResponseEnabled: isJsonResponseEnabled,
           authToken: authToken,
+          corsConfig: corsConfig ?? const CorsConfig(),
+          allowedOrigins: allowedOrigins,
+          allowAnyOrigin: allowAnyOrigin,
+          enableStateless: enableStateless,
         ),
       );
       return transport;

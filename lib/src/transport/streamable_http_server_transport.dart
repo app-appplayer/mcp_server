@@ -23,9 +23,37 @@ const String mcpProtocolVersionHeader = 'mcp-protocol-version';
 /// `MCP-Protocol-Version` header (2026-07-28 `HeaderMismatchError`).
 const int _headerMismatch = -32020;
 
-/// JSON-RPC error code: requested protocol version is unknown/unsupported
-/// (2026-07-28 `UnsupportedProtocolVersionError`).
+/// The client did not declare a capability the request needs (2026-07-28).
+const int _missingRequiredClientCapability = -32021;
+
+/// The requested protocol revision is not implemented here (2026-07-28).
+/// The error carries the versions this server does support so the client can
+/// retry rather than guess.
 const int _unsupportedProtocolVersion = -32022;
+
+/// Decodes the `=?base64?...?=` sentinel the spec defines for header values
+/// that cannot be carried as plain ASCII. Returns the value unchanged when it
+/// is not encoded, or null when the header is absent.
+String? _decodeHeaderSentinel(String? raw) {
+  if (raw == null) return null;
+  if (!raw.startsWith('=?base64?') || !raw.endsWith('?=')) return raw;
+  final payload = raw.substring('=?base64?'.length, raw.length - 2);
+  try {
+    return utf8.decode(base64.decode(payload));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Standard request headers this revision requires. `Mcp-Name` is required
+/// only for the operations that name a target.
+const String _mcpMethodHeader = 'mcp-method';
+const String _mcpNameHeader = 'mcp-name';
+const Set<String> _methodsRequiringName = {
+  'tools/call',
+  'resources/read',
+  'prompts/get',
+};
 
 // MCP StreamableHTTP Headers
 const String mcpSessionIdHeader = 'mcp-session-id';
@@ -81,11 +109,15 @@ class StreamableHttpServerConfig {
   /// (MCP 2025-11-25 requires HTTP 403 Forbidden for invalid `Origin`
   /// headers on the Streamable HTTP transport).
   ///
-  /// When non-null, a request that carries an `Origin` header whose value
-  /// is not in this list is rejected with `403 Forbidden` before dispatch.
-  /// Requests without an `Origin` header (non-browser clients) are not
-  /// affected. When null (default), `Origin` is not enforced — preserving
-  /// prior behavior for existing deployments (opt-in hardening).
+  /// A request carrying an `Origin` that is not in this list is rejected with
+  /// `403 Forbidden` before dispatch. Requests without an `Origin` header are
+  /// not affected — they did not come from a browser, so they cannot be a
+  /// rebinding attempt.
+  ///
+  /// When null (default) the allow-list is the local machine
+  /// (`localhost` / `127.0.0.1` / `[::1]`, any scheme or port). Name the
+  /// origins that must reach this server to widen it, or set
+  /// [allowAnyOrigin] to turn the check off.
   final List<String>? allowedOrigins;
 
   /// Space-delimited OAuth scope advertised on the `WWW-Authenticate`
@@ -97,6 +129,13 @@ class StreamableHttpServerConfig {
   /// required scope is then "unknown" and not advertised. Backward compatible:
   /// no effect unless PRM is configured and a 401 is emitted.
   final String? challengeScope;
+
+  /// Disables `Origin` checking entirely.
+  ///
+  /// The specification requires servers to validate `Origin` to prevent DNS
+  /// rebinding, so this is not a knob to reach for; it exists for deployments
+  /// that terminate the check in front of the server. Default **false**.
+  final bool allowAnyOrigin;
 
   /// Opt-in for the 2026-07-28 stateless core (SEP-2577). Default **false**:
   /// 2026-07-28 is neither served nor advertised, and a request carrying
@@ -113,6 +152,10 @@ class StreamableHttpServerConfig {
   /// Go `StreamableHTTPOptions.Stateless`, Python "answers both revisions").
   final bool enableStateless;
 
+  /// Revisions the stateless branch accepts. A request naming anything else is
+  /// answered with the supported list so the client can retry.
+  final Set<String> supportedProtocolVersions;
+
   const StreamableHttpServerConfig({
     this.endpoint = '/mcp',
     this.host = 'localhost',
@@ -127,7 +170,9 @@ class StreamableHttpServerConfig {
     this.enableGetStream = true, // Default: enabled per MCP 2025-03-26
     this.allowedOrigins, // Optional DNS-rebinding protection (opt-in)
     this.challengeScope, // Optional WWW-Authenticate scope (SEP-835)
+    this.allowAnyOrigin = false,
     this.enableStateless = false, // Opt-in 2026-07-28 stateless core (dormant)
+    this.supportedProtocolVersions = const {McpProtocol.v2026_07_28},
   });
 }
 
@@ -137,12 +182,26 @@ class CorsConfig {
   final String allowOrigin;
   final String allowMethods;
   final String allowHeaders;
+
+  /// Response headers a browser is allowed to read.
+  ///
+  /// Without this a browser hides every non-simple response header, including
+  /// `mcp-session-id` — the client would negotiate a session it can never see
+  /// and every subsequent request would arrive unsessioned.
+  final String exposeHeaders;
+
   final int maxAge;
-  
+
   const CorsConfig({
     this.allowOrigin = '*',
     this.allowMethods = 'POST, OPTIONS, GET, DELETE',
-    this.allowHeaders = 'Content-Type, Authorization, Accept, X-Session-ID, mcp-session-id, last-event-id',
+    // `MCP-Protocol-Version` is sent by spec-conformant clients from
+    // 2025-11-25 on. Omitting it fails the preflight, so a browser client
+    // cannot reach this server at all.
+    this.allowHeaders =
+        'Content-Type, Authorization, Accept, X-Session-ID, mcp-session-id, '
+        'last-event-id, MCP-Protocol-Version',
+    this.exposeHeaders = 'mcp-session-id, MCP-Protocol-Version, WWW-Authenticate',
     this.maxAge = 86400,
   });
 }
@@ -571,6 +630,17 @@ class StreamableHttpServerTransport implements ServerTransport {
     final incomingSessionId = request.headers.value(mcpSessionIdHeader);
     final hasSessionId =
         incomingSessionId != null && incomingSessionId.isNotEmpty;
+    // A version this build does not implement at all is answered with the
+    // supported list. Falling through to the legacy path instead would return
+    // a bare "invalid request", leaving the client nothing to retry with.
+    if (protoHeader != null &&
+        protoHeader.isNotEmpty &&
+        protoHeader != McpProtocol.v2026_07_28 &&
+        !McpProtocol.supportedVersions.contains(protoHeader)) {
+      await _sendUnsupportedProtocolVersion(request.response, protoHeader);
+      return;
+    }
+
     if (protoHeader == McpProtocol.v2026_07_28 && !hasSessionId) {
       if (!config.enableStateless) {
         // Version gate: 2026-07-28 is not served when the flag is off — the
@@ -789,7 +859,100 @@ class StreamableHttpServerTransport implements ServerTransport {
         ? (jsonRpcRequest['params'] as Map)['_meta']
         : null;
     final metaVersion = McpRequestMeta.readProtocolVersion(meta);
-    if (metaVersion != null && metaVersion != protoHeader) {
+    final method = jsonRpcRequest['method'] as String?;
+
+    // The revision must be one this server implements. Answering with a plain
+    // "invalid request" would leave the client nothing to retry with, so the
+    // supported list travels in the error.
+    if (!config.supportedProtocolVersions.contains(protoHeader)) {
+      _sendJsonRpcErrorStatus(
+        request.response,
+        jsonRpcRequest['id'],
+        _unsupportedProtocolVersion,
+        'Unsupported protocol version',
+        HttpStatus.badRequest,
+        data: {
+          'supported': config.supportedProtocolVersions.toList(),
+          'requested': protoHeader,
+        },
+      );
+      return;
+    }
+
+    // Requests only. This revision defines no client-to-server notifications
+    // over Streamable HTTP and explicitly leaves header requirements for
+    // notification POSTs undefined, so the per-request obligations below must
+    // not be imposed on one.
+    final isNotification = jsonRpcRequest['id'] == null;
+
+    // This revision carries version, identity and capabilities per request.
+    // Accepting a request without them would mean inferring context from the
+    // connection — exactly what the stateless core removes.
+    if (!isNotification && metaVersion == null) {
+      _sendJsonRpcErrorStatus(
+        request.response,
+        jsonRpcRequest['id'],
+        -32602,
+        'Invalid params',
+        HttpStatus.badRequest,
+        data: 'Missing required _meta.io.modelcontextprotocol/protocolVersion',
+      );
+      return;
+    }
+    if (!isNotification && McpRequestMeta.readClientCapabilities(meta) == null) {
+      _sendJsonRpcErrorStatus(
+        request.response,
+        jsonRpcRequest['id'],
+        _missingRequiredClientCapability,
+        'Missing required client capability',
+        HttpStatus.badRequest,
+        data: {
+          'requiredCapabilities': ['io.modelcontextprotocol/clientCapabilities'],
+        },
+      );
+      return;
+    }
+
+    // Standard request headers mirror body fields so intermediaries can route
+    // without parsing. A mirror that is absent, or disagrees with the body, is
+    // rejected — the two must not be able to say different things.
+    final methodHeader = request.headers.value(_mcpMethodHeader);
+    if (!isNotification && (methodHeader == null || methodHeader != method)) {
+      _sendJsonRpcErrorStatus(
+        request.response,
+        jsonRpcRequest['id'],
+        _headerMismatch,
+        'Header mismatch',
+        HttpStatus.badRequest,
+        data: methodHeader == null
+            ? 'Missing required Mcp-Method header'
+            : 'Mcp-Method ($methodHeader) does not match body method ($method)',
+      );
+      return;
+    }
+    if (!isNotification && _methodsRequiringName.contains(method)) {
+      final params = jsonRpcRequest['params'];
+      final bodyName = params is Map
+          ? (params['name'] ?? params['uri']) as Object?
+          : null;
+      final nameHeader = request.headers.value(_mcpNameHeader);
+      final decoded = _decodeHeaderSentinel(nameHeader);
+      if (decoded == null || decoded != bodyName) {
+        _sendJsonRpcErrorStatus(
+          request.response,
+          jsonRpcRequest['id'],
+          _headerMismatch,
+          'Header mismatch',
+          HttpStatus.badRequest,
+          data: decoded == null
+              ? 'Missing required Mcp-Name header'
+              : 'Mcp-Name ($decoded) does not match body value ($bodyName)',
+        );
+        return;
+      }
+    }
+
+    if (!isNotification && metaVersion != protoHeader) {
       _sendJsonRpcErrorStatus(
         request.response,
         jsonRpcRequest['id'],
@@ -1630,11 +1793,26 @@ class StreamableHttpServerTransport implements ServerTransport {
   ///   (non-browser clients are not subject to rebinding);
   /// - otherwise `true` only if the `Origin` value is in the allow-list.
   bool _isOriginAllowed(HttpRequest request) {
-    final allowed = config.allowedOrigins;
-    if (allowed == null) return true;
+    if (config.allowAnyOrigin) return true;
     final origin = request.headers.value('origin');
+    // A request with no `Origin` did not come from a browser, so it cannot be
+    // a rebinding attempt.
     if (origin == null) return true;
-    return allowed.contains(origin);
+    final allowed = config.allowedOrigins;
+    if (allowed != null) return allowed.contains(origin);
+    return _isLoopbackOrigin(origin);
+  }
+
+  /// Whether an `Origin` names the local machine.
+  ///
+  /// The default allow-list, because a rebinding attack works by pointing a
+  /// public page at a local server: a page served from the same machine is
+  /// not that attack, and everything else has to be named explicitly.
+  static bool _isLoopbackOrigin(String origin) {
+    final uri = Uri.tryParse(origin);
+    if (uri == null) return false;
+    final host = uri.host;
+    return host == 'localhost' || host == '127.0.0.1' || host == '::1';
   }
 
   /// Build the `WWW-Authenticate: Bearer …` challenge for a 401 response
@@ -1702,6 +1880,7 @@ class StreamableHttpServerTransport implements ServerTransport {
     response.headers.set('Access-Control-Allow-Origin', config.corsConfig.allowOrigin);
     response.headers.set('Access-Control-Allow-Methods', config.corsConfig.allowMethods);
     response.headers.set('Access-Control-Allow-Headers', config.corsConfig.allowHeaders);
+    response.headers.set('Access-Control-Expose-Headers', config.corsConfig.exposeHeaders);
     response.headers.set('Access-Control-Max-Age', config.corsConfig.maxAge.toString());
   }
   

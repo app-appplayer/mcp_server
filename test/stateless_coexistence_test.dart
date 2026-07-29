@@ -55,6 +55,18 @@ Future<Map<String, dynamic>> _rawPost(
     final req = await client.postUrl(Uri.parse('http://localhost:$port/mcp'));
     req.headers.set('Content-Type', 'application/json');
     req.headers.set('Accept', 'application/json, text/event-stream');
+    // 2026-07-28 mirrors the method (and target name where the operation has
+    // one) into headers; a conformant client always sends them.
+    final method = body['method'];
+    if (body['id'] != null && method is String) {
+      req.headers.set('Mcp-Method', method);
+      const namedMethods = {'tools/call', 'resources/read', 'prompts/get'};
+      if (namedMethods.contains(method)) {
+        final params = body['params'];
+        final target = params is Map ? (params['name'] ?? params['uri']) : null;
+        if (target != null) req.headers.set('Mcp-Name', '$target');
+      }
+    }
     headers.forEach(req.headers.set);
     req.write(jsonEncode(body));
     final resp = await req.close().timeout(const Duration(seconds: 5));

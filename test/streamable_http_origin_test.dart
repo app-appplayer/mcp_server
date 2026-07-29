@@ -123,6 +123,35 @@ void main() {
       }
     });
 
+    test('allowAnyOrigin turns the check off for fronted deployments', () async {
+      final transport = StreamableHttpServerTransport(
+        config: const StreamableHttpServerConfig(
+          port: 8524,
+          isJsonResponseEnabled: true,
+          allowAnyOrigin: true,
+        ),
+      );
+      final server = _attachServer(transport);
+      try {
+        await transport.start();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+
+        final response = await _send(
+          httpClient,
+          Uri.parse('http://localhost:8524/mcp'),
+          headers: {'Origin': 'http://any.example.com'},
+          body: _initBody(),
+        );
+
+        expect(response.statusCode, isNot(equals(403)));
+        await response.drain<void>();
+      } finally {
+        server.dispose();
+        transport.close();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+    });
+
     test('absent Origin header proceeds (non-browser client)', () async {
       final transport = StreamableHttpServerTransport(
         config: const StreamableHttpServerConfig(
@@ -151,7 +180,7 @@ void main() {
       }
     });
 
-    test('no enforcement when allowedOrigins is null (default)', () async {
+    test('default allow-list is the local machine, so a foreign Origin is refused', () async {
       final transport = StreamableHttpServerTransport(
         config: const StreamableHttpServerConfig(
           port: 8523,
@@ -170,7 +199,10 @@ void main() {
           body: _initBody(),
         );
 
-        expect(response.statusCode, isNot(equals(403)));
+        // The specification requires Origin validation; leaving it off by
+        // default was the defect. A page served from elsewhere must not
+        // reach a local server.
+        expect(response.statusCode, 403);
         await response.drain<void>();
       } finally {
         server.dispose();

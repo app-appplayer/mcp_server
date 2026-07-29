@@ -1,3 +1,79 @@
+## [2.1.2] - 2026-07-30 - Specification conformance + browser reachability
+
+### Fixed — specification conformance (verified against reference implementations)
+
+Found by running this server against the official TypeScript SDK and, for
+revision `2026-07-28`, the official Python SDK — none of these are visible when
+both ends are ours, because a mistake made on both sides passes.
+
+- `ping` answers with an empty result. It carried `pong` and a timestamp, which
+  a peer that validates result shapes rejects outright.
+- `resources/subscribe` / `resources/unsubscribe` answer with an empty result
+  instead of `{"success": true}`.
+- `resources/templates/list` returns templates registered through
+  `addResourceTemplate`. The handler read a different store than the
+  registration wrote to, so a registered template could never appear.
+- Progress notifications carry the client's `_meta.progressToken`. The server
+  minted its own token, which correlates with nothing on the client, so a
+  progress-reporting tool delivered nothing. `addToolWithProgress` also minted
+  an operation id of its own rather than using the one the call was registered
+  under; the operation is now published on the zone the handler runs in.
+- Revision `2026-07-28` only: caching hints (`ttlMs`, `cacheScope`) on the
+  results the specification requires them on; the standard request headers
+  (`Mcp-Method`, `Mcp-Name`, including the base64 sentinel form) are required
+  and validated against the body; a request missing the required `_meta` is
+  rejected with `-32602`; a request whose declared capabilities are absent is
+  rejected with `-32021`. Notifications are exempt — this revision does not
+  define header requirements for them.
+- A request naming a protocol revision this build does not implement is
+  answered with `-32022` and the list of supported versions. It previously fell
+  through to the legacy path and returned a bare `-32600`, which leaves a
+  client nothing to retry with.
+
+### Changed — internal floor
+
+- `mcp_client` floor raised to `^2.1.1`. This server now requires the standard
+  request headers on the 2026-07-28 path, and 2.1.1 is the release that sends
+  them; resolved against 2.1.0 the stateless suites fail.
+
+### Changed — `Origin` is validated by default
+
+The specification requires servers to validate `Origin` to prevent DNS
+rebinding. Enforcement was opt-in and off, so a default deployment accepted a
+browser request from any site. The default allow-list is now the local machine
+(`localhost` / `127.0.0.1` / `[::1]`); name other origins with `allowedOrigins`,
+or set the new `allowAnyOrigin` for deployments that terminate the check in
+front of the server. Requests without an `Origin` header are unaffected — they
+did not come from a browser.
+
+**This can reject traffic a previous version accepted.** A server reached from
+a browser on another origin must now name it.
+
+### Added
+
+- `corsConfig`, `allowedOrigins`, `allowAnyOrigin` and `enableStateless` on the
+  Streamable HTTP transport factories. They were configurable on the config
+  object but unreachable through the factory, which is the documented way to
+  build a transport — so `authToken` could be set and the security-relevant
+  settings could not. `CorsConfig` is now exported.
+
+### Fixed — browser clients could not reach this server
+- `Access-Control-Allow-Headers` now includes `MCP-Protocol-Version`. Clients
+  send it from spec revision 2025-11-25 on, and a browser refuses the request
+  outright when a sent header is not allowed — the call failed as an opaque
+  `Failed to fetch` before it ever reached the server, so no server-side log
+  showed anything wrong.
+- New `CorsConfig.exposeHeaders`, emitted as `Access-Control-Expose-Headers`
+  (`mcp-session-id`, `MCP-Protocol-Version`, `WWW-Authenticate`). A browser
+  hides every non-simple response header, so a client could negotiate a session
+  it was then unable to read, and every following request would arrive without
+  one.
+
+Found by connecting a browser build to this server, not by inspection: both
+defects are invisible to a non-browser client.
+
+Default values only; no public API removed. `CorsConfig` gains `exposeHeaders`.
+
 ## [2.1.1] - 2026-07-28 - Session-scoped in-flight request tracking
 
 Bug fix. No public API change; the JSON-RPC wire contract is unchanged (request

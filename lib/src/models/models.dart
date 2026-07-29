@@ -337,13 +337,11 @@ class CallToolResult {
   final List<Content> content;
   final Map<String, dynamic>? structuredContent;
 
-  /// NON-STANDARD (makemind) legacy hint. Not part of the MCP `CallToolResult`
-  /// spec and honored nowhere (the transport closes a tool-call stream on the
-  /// final result regardless of this flag). The standard pattern is: **enable**
-  /// streaming with a tool (`tools/call`) and **deliver** the stream via a
-  /// reactive resource (`subscriptions/listen` on 2026-07-28, `resources/
-  /// subscribe` on ≤2025-11-25). Retained + still serialized for backward
-  /// compatibility; slated for removal in the next major (3.0).
+  /// Non-standard streaming hint. Honored nowhere: enable streaming via a
+  /// tool and deliver the data through a reactive resource (`subscriptions/
+  /// listen` on 2026-07-28, `resources/subscribe` on ≤2025-11-25). Retained +
+  /// still serialized for backward compatibility; slated for removal in the
+  /// next major (3.0).
   @Deprecated(
       'Non-standard hint, honored nowhere. Enable streaming via a tool and '
       'deliver via a reactive resource (subscriptions/listen). Removed in 3.0.')
@@ -1375,6 +1373,15 @@ class PendingOperation {
   final String type;
   final DateTime createdAt;
   final String? requestId;
+
+  /// The `_meta.progressToken` the client sent with the request, if any.
+  ///
+  /// Progress notifications must carry the client's own token: it is how the
+  /// client correlates them with the call it made. A token the server invents
+  /// correlates with nothing and the notification is discarded. Absent means
+  /// the client did not opt in, and no progress is sent at all.
+  final Object? progressToken;
+
   bool isCancelled = false;
 
   PendingOperation({
@@ -1382,6 +1389,7 @@ class PendingOperation {
     required this.sessionId,
     required this.type,
     this.requestId,
+    this.progressToken,
   }) : createdAt = DateTime.now();
 
   Map<String, dynamic> toJson() {

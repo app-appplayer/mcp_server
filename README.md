@@ -29,6 +29,11 @@ Implements the Model Context Protocol specification across **four** revisions:
 | `2025-06-18` | Adds elicitation, structured tool output, resource links, OAuth Resource Server, MCP-Protocol-Version header. Removes JSON-RPC batching |
 | `2025-11-25` | Adds icons, sampling tool calling (`tools` / `toolChoice`), URL-mode elicitation, OIDC Discovery, Client ID Metadata Documents |
 
+`2026-07-28` is published and is the current specification revision. This build
+does not negotiate it — it is absent from `McpProtocol.supportedVersions`, so a
+peer is never offered it. The reference TypeScript SDK (1.30.0) does not
+implement it either. The versions in the table are what this build speaks.
+
 The negotiated version determines which features are advertised and which dispatch paths are taken. `McpProtocol.supportsBatching(v)` / `supportsElicitation(v)` / `supportsStructuredToolOutput(v)` / `supportsIconsAndSamplingTools(v)` / `requiresProtocolHeader(v)` are runtime gates server logic uses to branch.
 
 ## Getting Started

@@ -70,6 +70,19 @@ Future<({Map<String, dynamic> message, HttpHeaders headers, int status})>
     final req = await client.postUrl(Uri.parse('http://localhost:$port/mcp'));
     req.headers.set('Content-Type', 'application/json');
     req.headers.set('Accept', 'application/json, text/event-stream');
+    // 2026-07-28 mirrors the method (and the target name, where the operation
+    // has one) into headers; a request without them is rejected, so the
+    // fixture sends what a conformant client would.
+    final method = body['method'];
+    if (body['id'] != null && method is String) {
+      req.headers.set('Mcp-Method', method);
+      const namedMethods = {'tools/call', 'resources/read', 'prompts/get'};
+      if (namedMethods.contains(method)) {
+        final params = body['params'];
+        final target = params is Map ? (params['name'] ?? params['uri']) : null;
+        if (target != null) req.headers.set('Mcp-Name', '$target');
+      }
+    }
     headers.forEach(req.headers.set);
     req.write(jsonEncode(body));
     final resp = await req.close().timeout(timeout);
@@ -95,6 +108,19 @@ Future<void> _postNotification(
     final req = await client.postUrl(Uri.parse('http://localhost:$port/mcp'));
     req.headers.set('Content-Type', 'application/json');
     req.headers.set('Accept', 'application/json, text/event-stream');
+    // 2026-07-28 mirrors the method (and the target name, where the operation
+    // has one) into headers; a request without them is rejected, so the
+    // fixture sends what a conformant client would.
+    final method = body['method'];
+    if (body['id'] != null && method is String) {
+      req.headers.set('Mcp-Method', method);
+      const namedMethods = {'tools/call', 'resources/read', 'prompts/get'};
+      if (namedMethods.contains(method)) {
+        final params = body['params'];
+        final target = params is Map ? (params['name'] ?? params['uri']) : null;
+        if (target != null) req.headers.set('Mcp-Name', '$target');
+      }
+    }
     headers.forEach(req.headers.set);
     req.write(jsonEncode(body));
     final resp = await req.close().timeout(const Duration(seconds: 5));
@@ -283,9 +309,12 @@ void main() {
           'params': {
             'name': 'slow',
             'arguments': {'tag': 'STATELESS'},
+            // Reserved `io.modelcontextprotocol/*` keys — the bare names are
+            // not what this revision defines and are not read as protocol
+            // metadata.
             '_meta': {
-              'protocolVersion': '2026-07-28',
-              'clientCapabilities': <String, dynamic>{},
+              'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+              'io.modelcontextprotocol/clientCapabilities': <String, dynamic>{},
             },
           },
         },
