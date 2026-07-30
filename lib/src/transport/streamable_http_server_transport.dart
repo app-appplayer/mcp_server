@@ -195,12 +195,21 @@ class CorsConfig {
   const CorsConfig({
     this.allowOrigin = '*',
     this.allowMethods = 'POST, OPTIONS, GET, DELETE',
-    // `MCP-Protocol-Version` is sent by spec-conformant clients from
-    // 2025-11-25 on. Omitting it fails the preflight, so a browser client
-    // cannot reach this server at all.
+    // Must cover every header a conformant client sends. A browser refuses to
+    // issue a request carrying a header the server has not allowed, so the
+    // call dies in preflight — before any server code runs and with nothing in
+    // the server log. Each omission below was found by pointing a real browser
+    // at a live origin, never by inspection:
+    //   `MCP-Protocol-Version` — sent from revision 2025-11-25 on.
+    //   `Cache-Control`        — sent on the SSE stream (`no-cache`).
+    //   `Mcp-Method` / `Mcp-Name` — REQUIRED on the 2026-07-28 path, so
+    //                            omitting them barred browsers from that
+    //                            revision entirely.
+    //   `X-Heartbeat-Interval` — sent by the compressed-SSE transport.
     this.allowHeaders =
         'Content-Type, Authorization, Accept, X-Session-ID, mcp-session-id, '
-        'last-event-id, MCP-Protocol-Version',
+        'last-event-id, MCP-Protocol-Version, Cache-Control, Mcp-Method, '
+        'Mcp-Name, X-Heartbeat-Interval',
     this.exposeHeaders = 'mcp-session-id, MCP-Protocol-Version, WWW-Authenticate',
     this.maxAge = 86400,
   });

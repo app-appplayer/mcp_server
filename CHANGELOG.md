@@ -1,3 +1,23 @@
+## [2.2.1] - 2026-07-30 - Browser-reachable CORS, completed
+
+### Fixed
+
+- The CORS allow-list now covers every header a conformant client sends. It was
+  missing `Cache-Control` (sent on the SSE stream) and `Mcp-Method` / `Mcp-Name`
+  (**required** on the 2026-07-28 path, so a browser could not use that revision
+  at all), plus `X-Heartbeat-Interval` from the compressed-SSE transport.
+
+  A browser refuses to issue a request carrying a header the server has not
+  allowed, and it refuses before anything reaches the server — the call fails as
+  an opaque network error with nothing in the server log.
+
+  2.1.2 fixed this same class for `MCP-Protocol-Version`. It recurred because a
+  preflight reports **one** disallowed header at a time, so fixing whichever the
+  browser last named guarantees another round. The allow-list is now pinned
+  against the set the client actually sends, by a test that asks a live socket
+  and by a conformance axis that asks a real browser — a unit test can only
+  check the string, and the browser is the one that enforces it.
+
 ## [2.2.0] - 2026-07-30 - Request-scoped caller
 
 Additive. No public API removed, no signature changes.
