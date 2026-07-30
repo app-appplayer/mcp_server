@@ -1053,12 +1053,14 @@ class Server implements ServerInterface {
           if (item is Map<String, dynamic>) {
             final message = JsonRpcMessage.fromJson(item);
             message.sessionId = sessionId;
+            message.authorization = item['_authorization'] as String?;
             _messageController.add(message);
           }
         }
       } else if (parsed is Map<String, dynamic>) {
         final message = JsonRpcMessage.fromJson(parsed);
         message.sessionId = sessionId; // Attach session ID
+        message.authorization = parsed['_authorization'] as String?;
         _messageController.add(message);
       } else {
         _sendErrorResponse(sessionId, null, ErrorCode.invalidRequest, 'Invalid request format');
@@ -1230,6 +1232,11 @@ class Server implements ServerInterface {
       return;
     }
     
+    // Who is calling. Stays null for an anonymous request (no middleware, or a
+    // method that needs no auth) — handlers distinguish that from an
+    // authenticated caller and fail closed when they must.
+    AuthContext? caller;
+
     // Check authentication if middleware is enabled
     if (_authMiddleware != null && McpMethodAuth.requiresAuth(request.method ?? '')) {
       final authResult = await _authenticateRequest(sessionId, request);
@@ -1245,11 +1252,12 @@ class Server implements ServerInterface {
       
       // Store auth context in session
       if (authResult != null && authResult.isAuthenticated) {
-        session.authContext = AuthContext(
+        caller = AuthContext(
           userInfo: authResult.userInfo!,
           scopes: authResult.validatedScopes ?? [],
           timestamp: DateTime.now(),
         );
+        session.authContext = caller;
       }
     }
     
@@ -1291,6 +1299,17 @@ class Server implements ServerInterface {
       return;
     }
 
+    // Publish the caller for the whole dispatch. Routing through one wrapper
+    // covers tools, resources, and prompts alike — a per-handler wrap would
+    // leave whichever surface it missed as a way around the caller check.
+    return McpCaller.runWith(
+      caller,
+      () => _dispatchRequest(sessionId, request),
+    );
+  }
+
+  /// Route an authenticated, rate-limited request to its handler.
+  Future<void> _dispatchRequest(String sessionId, JsonRpcMessage request) async {
     switch (request.method) {
     // Common methods across protocol versions
       case 'tools/list':
@@ -2972,6 +2991,12 @@ class JsonRpcMessage {
   final Map<String, dynamic>? error;
   String sessionId = '';
 
+  /// Bearer credential the transport read off this request's `Authorization`
+  /// header, or null when it carried none. Set by the server from the
+  /// transport's reserved `_authorization` key — never from client-supplied
+  /// message content.
+  String? authorization;
+
   bool get isNotification => id == null && method != null;
   bool get isRequest => id != null && method != null;
   bool get isResponse => id != null && (result != null || error != null);
@@ -3090,9 +3115,14 @@ extension OAuthServerMethods on Server {
   Future<AuthResult?> _authenticateRequest(String sessionId, JsonRpcMessage request) async {
     if (_authMiddleware == null) return null;
     
-    // Extract authorization token from request params or session
+    // Where the token came from, in order: the request's `Authorization`
+    // header (what a standard client sends, carried through by the transport),
+    // then the message body, then the session. The header case used to be
+    // missing entirely, so header-authenticated requests never reached the
+    // validator and were reported as carrying no token at all.
     final session = _sessions[sessionId];
-    final token = request.params?['authorization'] as String? ?? 
+    final token = request.authorization ??
+                  request.params?['authorization'] as String? ??
                   session?.authToken;
     
     if (token == null) {

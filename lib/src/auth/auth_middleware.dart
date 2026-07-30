@@ -374,3 +374,53 @@ class AuthContext {
     'timestamp': timestamp.toIso8601String(),
   };
 }
+
+/// Zone key for the request-scoped caller. Private so nothing outside this
+/// library can plant a caller the server did not authenticate.
+const Object _callerZoneKey = #mcpAuthContext;
+
+/// The authenticated caller of the request currently being handled.
+///
+/// Handler signatures carry no request context, so the server publishes the
+/// caller on the zone for the duration of one request — the same mechanism the
+/// in-flight operation already uses. Tool, resource, and prompt handlers all
+/// read it the same way, no matter how many async hops from the dispatch:
+///
+/// ```dart
+/// final caller = McpCaller.current;
+/// if (caller == null) return denied;          // anonymous
+/// if (!caller.hasScope('knowledge:write')) return denied;
+/// ```
+///
+/// The server never interprets the token: [AuthContext.userInfo] is whatever
+/// the host's [TokenValidator] returned.
+class McpCaller {
+  const McpCaller._();
+
+  /// The caller for the request in flight, or `null` for an anonymous one.
+  ///
+  /// `null` means one of: the server has no auth middleware (open mode), the
+  /// method does not require auth, or the code is not running inside a
+  /// request. Handlers that must not serve anonymous callers check for `null`
+  /// and refuse — absence is never "trusted by default".
+  static AuthContext? get current {
+    final v = Zone.current[_callerZoneKey];
+    return v is AuthContext ? v : null;
+  }
+
+  /// Publish [caller] for the duration of [body]. Internal — only the server
+  /// calls this, right after it has authenticated the request.
+  ///
+  /// A null [caller] runs [body] untouched rather than planting an empty
+  /// value, so an anonymous request cannot shadow an outer caller.
+  @internal
+  static Future<T> runWith<T>(
+    AuthContext? caller,
+    Future<T> Function() body,
+  ) {
+    if (caller == null) return body();
+    return runZoned(body, zoneValues: <Object?, Object?>{
+      _callerZoneKey: caller,
+    });
+  }
+}

@@ -1,3 +1,33 @@
+## [2.2.0] - 2026-07-30 - Request-scoped caller
+
+Additive. No public API removed, no signature changes.
+
+### Added
+
+- `McpCaller.current` — the authenticated caller of the request being handled,
+  readable from tool, resource, and prompt handlers. Returns the request's
+  `AuthContext` (`userId`, `scopes`, `hasScope`), or `null` when the server has
+  no auth middleware, the method requires no auth, or the call is not inside a
+  request. `AuthContext.userInfo` is whatever the configured `TokenValidator`
+  returned.
+
+### Fixed
+
+- A bearer token in the `Authorization` header now reaches the validator
+  installed by `enableAuthentication`. The token was read only from the
+  JSON-RPC body and the session, and the Streamable HTTP transport populates
+  neither from the header, so a standard client's authenticated request was
+  refused as carrying no token and the validator was never called. Header
+  authentication was therefore unusable; only a token placed in `params`
+  worked, which no standard client sends.
+
+  The transport now carries the credential on the reserved `_authorization`
+  control key, stripped from client input at every ingestion boundary so a
+  request body cannot present one the transport did not read off the wire.
+  Applies to the plain, stateless and batch POST paths. Independent of
+  `config.authToken`, which is a static shared secret the transport compares
+  itself.
+
 ## [2.1.2] - 2026-07-30 - Specification conformance + browser reachability
 
 ### Fixed — specification conformance (verified against reference implementations)

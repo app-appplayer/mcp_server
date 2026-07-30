@@ -758,9 +758,11 @@ class StreamableHttpServerTransport implements ServerTransport {
     }
 
     // Wrap message with session ID metadata for Server
+    final bearer = _bearerCredential(request);
     final wrappedMessage = {
       ...jsonRpcRequest,
       '_sessionId': sessionId,  // Internal metadata for session routing
+      if (bearer != null) '_authorization': bearer,
     };
 
     // Handle notification (no response expected) AND incoming responses
@@ -967,11 +969,13 @@ class StreamableHttpServerTransport implements ServerTransport {
 
     // A transient, unregistered session id — never added to `_activeSessions`.
     final ephemeralId = _generateSessionId();
+    final bearer = _bearerCredential(request);
     final wrappedMessage = <String, dynamic>{
       ...jsonRpcRequest,
       '_sessionId': ephemeralId,
       '_stateless': true,
       '_protocolVersion': protoHeader,
+      if (bearer != null) '_authorization': bearer,
     };
 
     // 2026-07-28 `subscriptions/listen` (SEP-2577): a long-lived SSE stream
@@ -1198,7 +1202,12 @@ class StreamableHttpServerTransport implements ServerTransport {
         requestKeys.add(key);
       }
       if (!_messageController.isClosed) {
-        _messageController.add({...item, '_sessionId': sessionId});
+        final bearer = _bearerCredential(request);
+        _messageController.add(<String, dynamic>{
+          ...item,
+          '_sessionId': sessionId,
+          if (bearer != null) '_authorization': bearer,
+        });
       }
     }
 
@@ -1767,7 +1776,34 @@ class StreamableHttpServerTransport implements ServerTransport {
     '_stateless',
     '_protocolVersion',
     '_sessionId',
+    '_authorization',
   };
+
+  /// The bearer credential on this request, or null when the request carries
+  /// no `Authorization: Bearer` header.
+  ///
+  /// A JSON-RPC handler never sees the HTTP request, so a token that arrives
+  /// the way the specification says it does — a header — had no route to
+  /// `Server.enableAuthentication`'s validator, which looked only at the
+  /// message body and the session. That left header authentication, the form
+  /// every standard client sends, unable to reach the validator at all.
+  ///
+  /// The credential is carried on the reserved `_authorization` control key,
+  /// which is stripped from client input at every ingestion boundary, so a
+  /// request body cannot present one the transport did not read off the wire.
+  ///
+  /// Independent of `config.authToken`: that is a static shared secret the
+  /// transport compares itself, and a deployment using per-user tokens does
+  /// not set it.
+  static String? _bearerCredential(HttpRequest request) {
+    final header = request.headers.value('Authorization');
+    if (header == null) return null;
+    const scheme = 'bearer ';
+    if (header.length <= scheme.length) return null;
+    if (header.substring(0, scheme.length).toLowerCase() != scheme) return null;
+    final credential = header.substring(scheme.length).trim();
+    return credential.isEmpty ? null : credential;
+  }
 
   void _stripReservedKeys(Map<String, dynamic> message) {
     for (final k in _reservedControlKeys) {
