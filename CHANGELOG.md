@@ -1,3 +1,13 @@
+## [2.2.3] - 2026-07-31 - `strictMode: false` now does something
+
+### Fixed
+
+`enableAuthentication(validator, strictMode: false)` is documented as "validate what is offered, let the rest through". `AuthMiddleware` honoured it on the HTTP path, but the JSON-RPC request path never consulted it: `_authenticateRequest` returned a hard failure whenever no token was present, so the option was inert exactly where it decides whether a request is answered.
+
+The shape it exists for is common and was unreachable — an origin that is **public but personalizes for a signed-in caller**. Enabling authentication to *observe* a credential turned the origin private: every visitor arriving without one was refused. That is what a guest-then-promote surface does by default, so the mode that supports it should not have been the one that broke it.
+
+Found while building a public probe origin for the web runner: turning on a recording validator to see what a page attached refused every anonymous visitor. Three regressions drive a real session over a socket (a credential has to survive `initialize` → `resources/read`), and the guard is mutation-checked. The strict default is unchanged and separately pinned.
+
 ## [2.2.2] - 2026-07-31 - The caller's credential reaches the handler
 
 ### Fixed

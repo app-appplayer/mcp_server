@@ -3151,6 +3151,16 @@ extension OAuthServerMethods on Server {
                   request.params?['authorization'] as String?;
     
     if (token == null) {
+      // `strictMode: false` means "validate what is offered, let the rest
+      // through" — an origin that is public but personalizes for a signed-in
+      // caller. The middleware has always honoured that on the HTTP path; this
+      // path did not consult it, so the option was inert exactly where it
+      // decides whether a request is answered. A public origin that enabled
+      // authentication to *observe* a credential ended up refusing every
+      // visitor who had none.
+      if (!_authMiddleware!.strictMode) {
+        return (result: null, token: null);
+      }
       return (
         result: const AuthResult.failure(
             error: 'No authorization token provided'),
