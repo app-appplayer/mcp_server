@@ -1,3 +1,36 @@
+## [2.2.2] - 2026-07-31 - The caller's credential reaches the handler
+
+### Fixed
+
+- `AuthContext.token` is populated. It is a documented public field that
+  nothing had ever filled: the credential existed only as a local inside the
+  authentication helper, and the verdict it returned carries no token, so a
+  handler could learn everything about the caller except the token they
+  presented. `McpCaller.current!.token` was therefore always null.
+
+  This matters for a runtime that must act *as* the caller — forwarding a
+  request outward under the caller's own grant instead of holding a credential
+  of its own. Holding one is what that design avoids: a runtime that can ask
+  for a given user's data on its own authority is not isolated.
+
+  The credential is returned alongside the verdict rather than folded into
+  `AuthResult`. That type is public and hosts construct it in their own
+  `TokenValidator`, so carrying the credential there would put it on a value
+  hosts build themselves — where it would go unset again.
+
+  Present since the field was introduced; every version through 2.2.1 has it
+  empty. It survived because the tests covering `AuthContext` assert on
+  `userId` and `scopes`, and none looked at `token`.
+
+### Deprecated
+
+- `ClientSession.authToken`. Nothing in this package ever assigned it, so the
+  branch that read it as a fallback token source could not fire; that read is
+  removed. Making it fire would mean a session that authenticated once stays
+  authenticated for every later request on it — wrong wherever one connection
+  carries requests for different users, which is the case per-request identity
+  exists to serve. Removal in 3.0.
+
 ## [2.2.1] - 2026-07-30 - Browser-reachable CORS, completed
 
 ### Fixed

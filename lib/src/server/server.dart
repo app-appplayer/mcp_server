@@ -1239,7 +1239,8 @@ class Server implements ServerInterface {
 
     // Check authentication if middleware is enabled
     if (_authMiddleware != null && McpMethodAuth.requiresAuth(request.method ?? '')) {
-      final authResult = await _authenticateRequest(sessionId, request);
+      final auth = await _authenticateRequest(sessionId, request);
+      final authResult = auth.result;
       if (authResult != null && !authResult.isAuthenticated) {
         _sendErrorResponse(
           sessionId,
@@ -1255,6 +1256,11 @@ class Server implements ServerInterface {
         caller = AuthContext(
           userInfo: authResult.userInfo!,
           scopes: authResult.validatedScopes ?? [],
+          // The credential the caller presented. A handler that must act as
+          // the caller — forwarding a request outward under the caller's own
+          // grant instead of holding one of its own — needs the token itself,
+          // not only the claims read out of it.
+          token: auth.token,
           timestamp: DateTime.now(),
         );
         session.authContext = caller;
@@ -3111,32 +3117,56 @@ abstract class ServerInterface {
 // Only the truly-internal helper `_authenticateRequest` stays on this
 // extension — it's invoked statically from inside the class.
 extension OAuthServerMethods on Server {
-  /// Authenticate a request using the configured auth middleware
-  Future<AuthResult?> _authenticateRequest(String sessionId, JsonRpcMessage request) async {
-    if (_authMiddleware == null) return null;
+  /// Authenticate a request, returning the verdict together with the
+  /// credential it was reached with.
+  ///
+  /// The token is returned alongside rather than folded into [AuthResult]:
+  /// that type is public and describes the *verdict*, and a host's own
+  /// `TokenValidator` constructs it. Carrying the credential there would put
+  /// it on a value hosts build themselves, where it would go unset again.
+  ///
+  /// The caller needs it because `AuthContext.token` is a documented public
+  /// field that nothing has ever filled: the credential existed only as a
+  /// local here, so a handler asking who called could learn everything about
+  /// them except the token they presented. A runtime that must act *as* the
+  /// caller — forwarding the request outward under the caller's own grant
+  /// rather than holding a credential of its own — has no way to do it.
+  Future<({AuthResult? result, String? token})> _authenticateRequest(
+      String sessionId, JsonRpcMessage request) async {
+    if (_authMiddleware == null) return (result: null, token: null);
     
     // Where the token came from, in order: the request's `Authorization`
     // header (what a standard client sends, carried through by the transport),
-    // then the message body, then the session. The header case used to be
-    // missing entirely, so header-authenticated requests never reached the
-    // validator and were reported as carrying no token at all.
-    final session = _sessions[sessionId];
+    // then the message body. The header case used to be missing entirely, so
+    // header-authenticated requests never reached the validator and were
+    // reported as carrying no token at all.
+    //
+    // `ClientSession.authToken` was a third source here and is deliberately
+    // not consulted: nothing in this package ever assigned it, so the branch
+    // could not fire. Making it fire would mean a session that authenticated
+    // once stays authenticated for every later request on it — which is wrong
+    // wherever one connection carries requests for different users, the case
+    // per-request identity exists to serve.
     final token = request.authorization ??
-                  request.params?['authorization'] as String? ??
-                  session?.authToken;
+                  request.params?['authorization'] as String?;
     
     if (token == null) {
-      return const AuthResult.failure(error: 'No authorization token provided');
+      return (
+        result: const AuthResult.failure(
+            error: 'No authorization token provided'),
+        token: null,
+      );
     }
     
     // Get required scopes for this method
     final requiredScopes = McpMethodAuth.getRequiredScopes(request.method ?? '');
     
     // Validate token
-    return await _authMiddleware!.validator.validateToken(
+    final result = await _authMiddleware!.validator.validateToken(
       token, 
       requiredScopes: requiredScopes.isNotEmpty ? requiredScopes : null
     );
+    return (result: result, token: token);
   }
   
 

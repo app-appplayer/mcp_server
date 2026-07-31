@@ -1442,6 +1442,15 @@ class ClientSession {
   bool isStateless = false;
   
   // OAuth 2.1 authentication support (2025-03-26)
+  /// Deprecated: never assigned by this package, and nothing reads it.
+  ///
+  /// It was consulted as a fallback token source, but no code path ever set
+  /// it, so the branch could not fire. Populating it would mean a session that
+  /// authenticated once stays authenticated for every later request on it —
+  /// wrong wherever one connection carries requests for different users, which
+  /// is the case per-request identity exists to serve. The read was removed
+  /// rather than made to work.
+  @Deprecated('Never populated; authenticate per request. Removed in 3.0.')
   String? authToken;
   Map<String, Map<String, dynamic>>? pendingAuthCodes;
   Map<String, Map<String, dynamic>>? accessTokens;
