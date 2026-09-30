@@ -1,3 +1,18 @@
+## [2.2.4] - 2026-09-30 - Closing an SSE transport with clients attached
+
+### Fixed
+
+`SseServerTransport.close()` failed whenever a client was still connected, which is the normal case when a host shuts down or disconnects a server:
+
+- Closing a session's response fires its `done` callback, which removes the session from the map `close()` was iterating, so the loop threw `Concurrent modification during iteration`.
+- A session whose write was still flushing — a client that stopped reading — threw `Bad state: StreamSink is bound to a stream` when closed.
+
+Either error escaped as an unhandled async error, because `close()` is declared `void`, and it was thrown before the HTTP server was closed: the port stayed bound, so the host could not rebind it, and `onClose` never completed.
+
+`close()` now works from a snapshot of the open sessions, waits for a pending flush for at most two seconds before closing each one, and handles a session that fails to close on its own. The HTTP server is closed in every case, and `onClose` completes only after it is. Closing twice is harmless. The `ServerTransport.close()` signature is unchanged.
+
+Reported as issue #5. The reporter's two cases — an idle client and a stalled one — are regression tests that check for no escaped error and a released port once `onClose` completes; all three tests fail on 2.2.3.
+
 ## [2.2.3] - 2026-07-31 - `strictMode: false` now does something
 
 ### Fixed

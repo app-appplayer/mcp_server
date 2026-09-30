@@ -168,7 +168,7 @@ class StreamableHttpServerConfig {
     this.jsonResponseMode = 'sync', // Default to synchronous JSON responses
     this.authToken, // Optional Bearer token for authentication
     this.enableGetStream = true, // Default: enabled per MCP 2025-03-26
-    this.allowedOrigins, // Optional DNS-rebinding protection (opt-in)
+    this.allowedOrigins, // Widens the default loopback-only allow-list
     this.challengeScope, // Optional WWW-Authenticate scope (SEP-835)
     this.allowAnyOrigin = false,
     this.enableStateless = false, // Opt-in 2026-07-28 stateless core (dormant)
@@ -506,8 +506,10 @@ class StreamableHttpServerTransport implements ServerTransport {
 
       // DNS-rebinding protection (MCP 2025-11-25): reject a request whose
       // `Origin` header is present but not allow-listed with 403 Forbidden,
-      // before any dispatch. Opt-in — enforced only when `allowedOrigins`
-      // is configured; requests without an `Origin` header are unaffected.
+      // before any dispatch. Enforced by default — with no `allowedOrigins`
+      // the allow-list is the local machine, so a deployed server refuses
+      // every browser until it names the origins it serves. Requests without
+      // an `Origin` header are unaffected; they did not come from a browser.
       if (!_isOriginAllowed(request)) {
         _setCorsHeaders(request.response);
         _sendErrorResponse(
@@ -1833,10 +1835,17 @@ class StreamableHttpServerTransport implements ServerTransport {
   
   /// DNS-rebinding protection (MCP 2025-11-25). Returns `true` when the
   /// request may proceed:
-  /// - always `true` when `config.allowedOrigins` is null (enforcement off);
+  /// - always `true` when `config.allowAnyOrigin` is set (the check is off);
   /// - always `true` when the request carries no `Origin` header
   ///   (non-browser clients are not subject to rebinding);
-  /// - otherwise `true` only if the `Origin` value is in the allow-list.
+  /// - with `config.allowedOrigins` set, `true` only for a listed origin;
+  /// - with it null — the default — `true` only for the **local machine**.
+  ///
+  /// The last line is the one that surprises: null does not mean "off", it
+  /// means "loopback only". A server deployed anywhere therefore refuses every
+  /// browser until it names the origins it serves, and the refusal is a 403 a
+  /// page cannot read — so it surfaces as "could not reach the origin" rather
+  /// than as a configuration gap.
   bool _isOriginAllowed(HttpRequest request) {
     if (config.allowAnyOrigin) return true;
     final origin = request.headers.value('origin');

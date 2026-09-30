@@ -364,7 +364,9 @@ class SseServerTransport implements ServerTransport {
       _sessionClients.remove(sessionId);
       _sessionCompression.remove(sessionId);
 
-      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+      // While close() runs, it completes onClose itself once the server is
+      // closed; a session ending on the way must not complete it first.
+      if (!_closing && _sessionClients.isEmpty && !_closeCompleter.isCompleted) {
         _logger.info('[SSE] All clients disconnected, completing onClose');
         _closeCompleter.complete();
       }
@@ -373,7 +375,7 @@ class SseServerTransport implements ServerTransport {
       _sessionClients.remove(sessionId);
       _sessionCompression.remove(sessionId);
 
-      if (_sessionClients.isEmpty && !_closeCompleter.isCompleted) {
+      if (!_closing && _sessionClients.isEmpty && !_closeCompleter.isCompleted) {
         _logger.info('[SSE] All clients disconnected (after error), completing onClose');
         _closeCompleter.complete();
       }
@@ -516,18 +518,50 @@ class SseServerTransport implements ServerTransport {
     }
   }
 
+  /// How long a session's pending write may hold shutdown. A client that
+  /// stopped reading keeps a flush open indefinitely; past this the session
+  /// is closed anyway.
+  static const Duration _closeFlushLimit = Duration(seconds: 2);
+
+  bool _closing = false;
+
+  /// Closes every SSE session, then the HTTP server, and never throws.
+  ///
+  /// Sessions are closed from a snapshot: closing a response fires its `done`
+  /// callback, which removes the session from the live map. Each waits for its
+  /// pending write first — closing a response while a flush is in flight
+  /// throws — bounded by [_closeFlushLimit]. A session that still fails to
+  /// close is logged and the rest are closed regardless. The HTTP server is
+  /// closed in `finally`, so the port is released whatever a session does.
+  /// [onClose] completes when all of it is done.
   @override
-  void close() async {
-    for (final client in _sessionClients.values) {
-      await client.close();
-    }
+  Future<void> close() async {
+    if (_closing) return _closeCompleter.future;
+    _closing = true;
+    final sessions = Map<String, HttpResponse>.of(_sessionClients);
+    final pendingWrites = Map<String, Future<void>>.of(_sessionFlushChain);
     _sessionClients.clear();
-
-    await _server?.close(force: true);
-    _messageController.close();
-
-    if (!_closeCompleter.isCompleted) {
-      _closeCompleter.complete();
+    _sessionCompression.clear();
+    try {
+      await Future.wait(sessions.entries.map((entry) async {
+        try {
+          await (pendingWrites[entry.key] ?? Future<void>.value())
+              .timeout(_closeFlushLimit, onTimeout: () {});
+          await entry.value.close();
+        } catch (e) {
+          _logger.debug('[SSE] closing session ${entry.key} failed: $e');
+        }
+      }));
+    } finally {
+      _sessionFlushChain.clear();
+      try {
+        await _server?.close(force: true);
+      } catch (e) {
+        _logger.error('[SSE] closing the HTTP server failed: $e');
+      }
+      _server = null;
+      if (!_messageController.isClosed) await _messageController.close();
+      if (!_closeCompleter.isCompleted) _closeCompleter.complete();
     }
   }
 }
